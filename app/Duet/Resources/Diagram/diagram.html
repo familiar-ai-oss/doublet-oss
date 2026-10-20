@@ -1,0 +1,26 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=4">
+<style>
+  :root { color-scheme: light dark; }
+  html, body { margin: 0; padding: 0; background: transparent; }
+  body { font: 15px -apple-system, BlinkMacSystemFont, sans-serif; -webkit-user-select: none; -webkit-touch-callout: none; }
+  #d { padding: 20px 16px; display: flex; justify-content: center; }
+  #d svg { max-width: 100%; height: auto; }
+  /* A preview: the whole diagram, scaled to the view. */
+  body.fit #d { padding: 10px; box-sizing: border-box; height: 100vh; align-items: center; }
+  body.fit #d svg { max-height: 100%; }
+  #err { color: #d70015; font: 13px ui-monospace, Menlo, monospace; white-space: pre-wrap; padding: 0 16px 16px; }
+  .duet-hot { filter: drop-shadow(0 0 5px rgba(255, 149, 0, 0.95)); }
+  .duet-sel { filter: drop-shadow(0 0 6px rgba(10, 132, 255, 0.95)); }
+</style>
+<script src="mermaid.min.js"></script>
+<script src="duet-bridge.js"></script>
+</head>
+<body>
+<div id="d"></div>
+<div id="err"></div>
+</body>
+</html>

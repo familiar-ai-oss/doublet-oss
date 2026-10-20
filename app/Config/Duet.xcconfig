@@ -1,0 +1,12 @@
+// Public defaults for every target and configuration. Put your own values in Local.xcconfig next to this file
+// (git-ignored; copy Local.xcconfig.example), which overrides these.
+
+// The app's bundle id. The extension, the tests, the Handoff and pane types and the Keychain item derive from it.
+DUET_BUNDLE_ID = com.example.doublet
+// Your Apple developer team. DUET_MAC_TEAM signs the Mac app; Handoff needs the Mac and iPad apps on one team.
+DUET_TEAM =
+DUET_MAC_TEAM = $(DUET_TEAM)
+// The hub a fresh install connects to until one is set in Settings. Write // as /$()/ (xcconfig reads // as a comment).
+DUET_HUB_URL =
+
+#include? "Local.xcconfig"

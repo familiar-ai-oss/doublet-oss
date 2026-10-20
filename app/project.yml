@@ -1,0 +1,212 @@
+# Duet app: `xcodegen` generates Duet.xcodeproj (not checked in). DuetKit is a local Swift package
+# (protocol, connection, store) so its fixture tests also run with `swift test`.
+name: Duet
+options:
+  bundleIdPrefix: com.example
+  deploymentTarget:
+    iOS: "27.0"
+    macOS: "27.0"
+packages:
+  DuetKit:
+    path: DuetKit
+  MarkdownUI:
+    url: https://github.com/gonzalezreal/swift-markdown-ui
+    exactVersion: 2.4.1
+  SwiftTerm:
+    url: https://github.com/migueldeicaza/SwiftTerm
+    exactVersion: 1.11.2
+# Bundle id, team and default hub: Config/Duet.xcconfig, overridden by your git-ignored Config/Local.xcconfig.
+configFiles:
+  Debug: Config/Duet.xcconfig
+  Release: Config/Duet.xcconfig
+settings:
+  base:
+    DEVELOPMENT_TEAM: $(DUET_TEAM)
+    CODE_SIGN_STYLE: Automatic
+    SWIFT_VERSION: "6.0"
+    MARKETING_VERSION: "0.1"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+targets:
+  Duet-macOS:
+    type: application
+    platform: macOS
+    sources:
+      - Duet
+      # The app icon (Icon Composer): one file for iOS and macOS, light, dark and clear.
+      - path: Icon/AppIcon.icon
+        type: file
+        buildPhase: resources
+    dependencies:
+      - package: DuetKit
+      - package: MarkdownUI
+      - package: SwiftTerm
+    info:
+      path: Generated/Info-macOS.plist
+      properties:
+        CFBundleDisplayName: Doublet
+        DuetBundleID: $(DUET_BUNDLE_ID)
+        DuetDefaultHubURL: $(DUET_HUB_URL)
+        LSApplicationCategoryType: public.app-category.developer-tools
+        NSMicrophoneUsageDescription: Doublet listens when you dictate or talk with Claude. What you say is recognized on this Mac.
+        NSSpeechRecognitionUsageDescription: Doublet turns what you say into text on this Mac, with Apple's speech recognition.
+        CFBundleURLTypes:
+          - CFBundleURLName: $(DUET_BUNDLE_ID)
+            CFBundleURLSchemes: [doublet, duet]
+        # Handoff with the iPad (Duet/App/Handoff.swift).
+        NSUserActivityTypes: [$(DUET_BUNDLE_ID).place]
+        # A pane dragged between Duet's windows (PaneDrag in Duet/App/Workspace.swift).
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: $(DUET_BUNDLE_ID).pane
+            UTTypeDescription: Doublet pane
+            UTTypeConformsTo: [public.data]
+    entitlements:
+      path: Generated/Duet-macOS.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.network.client: true
+        # Dictation and Talk mode.
+        com.apple.security.device.audio-input: true
+        com.apple.security.device.microphone: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(DUET_BUNDLE_ID)
+        PRODUCT_NAME: Doublet
+        # The app is named Doublet; its Swift module keeps the code's name (the tests `@testable import Duet`).
+        PRODUCT_MODULE_NAME: Duet
+        # The same team the iPad build is signed with: Handoff only works between apps from one team.
+        DEVELOPMENT_TEAM: $(DUET_MAC_TEAM)
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  Duet-iOS:
+    type: application
+    platform: iOS
+    # LiveActivity: the Lock Screen's Approve and Reject intents, which iOS runs in the app's process.
+    sources:
+      - Duet
+      - LiveActivity
+      - path: Icon/AppIcon.icon
+        type: file
+        buildPhase: resources
+    dependencies:
+      - package: DuetKit
+      - package: MarkdownUI
+      - package: SwiftTerm
+      - target: DuetWidgets
+    info:
+      path: Generated/Info-iOS.plist
+      properties:
+        CFBundleDisplayName: Doublet
+        DuetBundleID: $(DUET_BUNDLE_ID)
+        DuetDefaultHubURL: $(DUET_HUB_URL)
+        NSMicrophoneUsageDescription: Doublet listens when you dictate or talk with Claude. What you say is recognized on this device.
+        NSSpeechRecognitionUsageDescription: Doublet turns what you say into text on this device, with Apple's speech recognition.
+        # Talk mode carries on with the screen locked.
+        UIBackgroundModes: [audio]
+        NSSupportsLiveActivities: true
+        NSSupportsLiveActivitiesFrequentUpdates: true
+        UILaunchScreen: {}
+        UIApplicationSceneManifest:
+          UIApplicationSupportsMultipleScenes: true
+        UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        UISupportedInterfaceOrientations~ipad: [UIInterfaceOrientationPortrait, UIInterfaceOrientationPortraitUpsideDown, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]
+        CFBundleURLTypes:
+          - CFBundleURLName: $(DUET_BUNDLE_ID)
+            CFBundleURLSchemes: [doublet, duet]
+        # Handoff with the Mac (Duet/App/Handoff.swift), and a tab dropped at the screen's edge opening a window of its
+        # own (PaneActivity in Duet/App/Windows.swift).
+        NSUserActivityTypes: [$(DUET_BUNDLE_ID).place, $(DUET_BUNDLE_ID).pane]
+        # A pane dragged between Duet's windows (PaneDrag in Duet/App/Workspace.swift).
+        UTExportedTypeDeclarations:
+          - UTTypeIdentifier: $(DUET_BUNDLE_ID).pane
+            UTTypeDescription: Doublet pane
+            UTTypeConformsTo: [public.data]
+    entitlements:
+      path: Generated/Duet-iOS.entitlements
+      properties:
+        # Live Activity push tokens (the hub updates the Lock Screen through APNs).
+        aps-environment: development
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(DUET_BUNDLE_ID)
+        PRODUCT_NAME: Doublet
+        # The app is named Doublet; its Swift module keeps the code's name (the tests `@testable import Duet`).
+        PRODUCT_MODULE_NAME: Duet
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  # The app's own tests (Swift Testing): the side stage's tabs and panes (Workspace), and when a held tab lifts
+  # (LiftRule). Hosted by the iOS app in a simulator (`xcodebuild test -scheme Duet-iOS`); while it hosts them the app
+  # never connects, reads the Keychain or saves its layout (AppModel.inPreview).
+  DuetTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources: [DuetTests]
+    dependencies:
+      - target: Duet-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(DUET_BUNDLE_ID).tests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        TEST_HOST: "$(BUILT_PRODUCTS_DIR)/Doublet.app/Doublet"
+        BUNDLE_LOADER: "$(TEST_HOST)"
+  # Pressure tests (docs/diagnostics.md): random input for minutes at a time, and heavy scenarios measured for hitches,
+  # CPU and memory. They drive the iOS app in a simulator against a hub given in the environment (TEST_RUNNER_DUET_URL,
+  # usually tools/firehose.ts); with no hub they use the demo conversation.
+  DuetUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources: [DuetUITests]
+    dependencies:
+      - target: Duet-iOS
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(DUET_BUNDLE_ID).uitests
+        GENERATE_INFOPLIST_FILE: YES
+        TARGETED_DEVICE_FAMILY: "1,2"
+        TEST_TARGET_NAME: Duet-iOS
+  # The Live Activity: Lock Screen and Dynamic Island.
+  DuetWidgets:
+    type: app-extension
+    platform: iOS
+    sources: [Widgets, LiveActivity]
+    dependencies:
+      - package: DuetKit
+    info:
+      path: Generated/Info-Widgets.plist
+      properties:
+        CFBundleDisplayName: Doublet
+        DuetBundleID: $(DUET_BUNDLE_ID)
+        DuetDefaultHubURL: $(DUET_HUB_URL)
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(DUET_BUNDLE_ID).widgets
+        PRODUCT_NAME: DuetWidgets
+        TARGETED_DEVICE_FAMILY: "1,2"
+schemes:
+  Duet-macOS:
+    build: { targets: { Duet-macOS: all } }
+    run: { config: Debug }
+  Duet-iOS:
+    build: { targets: { Duet-iOS: all, DuetTests: [test] } }
+    run: { config: Debug }
+    test: { config: Debug, targets: [DuetTests] }
+  # The pressure tests, in Debug with the Main Thread Checker on (Xcode's default).
+  Duet-iOS-Pressure:
+    build: { targets: { Duet-iOS: all, DuetUITests: [test] } }
+    run: { config: Debug }
+    test: { config: Debug, targets: [DuetUITests] }
+  # The same app built with Thread Sanitizer (data races), and with Address and Undefined Behavior Sanitizers (memory
+  # misuse): run the unit and pressure tests under each. The two can't be combined.
+  Duet-iOS-TSan:
+    build: { targets: { Duet-iOS: all, DuetTests: [test], DuetUITests: [test] } }
+    run: { config: Debug, enableThreadSanitizer: true }
+    test: { config: Debug, targets: [DuetTests, DuetUITests], enableThreadSanitizer: true }
+  Duet-iOS-ASan:
+    build: { targets: { Duet-iOS: all, DuetTests: [test], DuetUITests: [test] } }
+    run: { config: Debug, enableAddressSanitizer: true, enableUBSanitizer: true }
+    test: { config: Debug, targets: [DuetTests, DuetUITests], enableAddressSanitizer: true, enableUBSanitizer: true }
+  Duet-macOS-TSan:
+    build: { targets: { Duet-macOS: all } }
+    run: { config: Debug, enableThreadSanitizer: true }

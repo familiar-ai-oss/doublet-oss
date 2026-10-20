@@ -1,0 +1,3 @@
+# Copy to local.mk (git-ignored) and fill in.
+# The ssh alias of the machine the hub runs on.
+HOST =

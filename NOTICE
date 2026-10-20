@@ -1,0 +1,8 @@
+Doublet
+Copyright 2026 Brendan White
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+It bundles third-party software in app/Duet/Resources/Diagram, each under its own license:
+  - Mermaid (https://github.com/mermaid-js/mermaid), MIT License: mermaid-LICENSE.txt
+  - highlight.js (https://github.com/highlightjs/highlight.js), BSD 3-Clause License: highlight.js-LICENSE.txt

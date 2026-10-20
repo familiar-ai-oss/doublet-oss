@@ -1,0 +1,8 @@
+# The commands Claude and the workers run (systemd/run-command.sh puts each in a scope here). Together they get at
+# most 48G, leaving the hub machine's model servers and the hub their memory. Installed by systemd/install.sh.
+[Unit]
+Description=Commands Claude and Duet's workers run
+
+[Slice]
+MemoryMax=48G
+MemorySwapMax=0

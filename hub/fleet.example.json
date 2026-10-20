@@ -1,0 +1,23 @@
+{
+  "workers": [
+    {
+      "id": "ollama",
+      "label": "Qwen3 8B · Ollama",
+      "backend": "ollama",
+      "url": "http://127.0.0.1:11434",
+      "model": "qwen3:8b",
+      "table": "ollama-onoff",
+      "enabled": true
+    },
+    {
+      "id": "big",
+      "label": "Qwen3 30B · Ollama on another machine",
+      "backend": "ollama",
+      "url": "http://my-gpu-box:11434",
+      "model": "qwen3:30b-a3b",
+      "table": "ollama-onoff",
+      "takes": "any",
+      "enabled": false
+    }
+  ]
+}

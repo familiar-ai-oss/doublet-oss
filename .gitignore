@@ -1,0 +1,22 @@
+# Your own settings (each has a checked-in .example beside it)
+/hub/local.env
+/hub/fleet.local.json
+/app/Config/Local.xcconfig
+/local.mk
+/.leakcheck.local
+
+# Private notes and device logs, not published
+/docs/
+/spikes/
+*.logarchive/
+
+# Generated
+node_modules/
+.build/
+/app/build/
+/app/Duet.xcodeproj/
+/app/Generated/
+*.noindex/
+xcuserdata/
+*.xcresult/
+.DS_Store

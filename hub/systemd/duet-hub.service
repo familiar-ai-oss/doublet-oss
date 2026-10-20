@@ -1,0 +1,25 @@
+# duet-hub as a systemd user service on the hub machine. Installed by `make install-hub`, which runs
+# systemd/install.sh: it replaces @NODE@ with the absolute path of the hub machine's node at install time.
+[Unit]
+Description=duet-hub: Doublet's lead (the user's own Claude Code, through the Agent SDK) behind a sequenced-event WebSocket
+After=network-online.target
+
+[Service]
+WorkingDirectory=%h/duet-hub
+Environment=DUET_PORT=7811
+Environment=DUET_PROJECT_DIR=%h
+# The lead's tools inherit this PATH (claude lives in ~/.local/bin).
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+# Each shell command Claude and the workers run gets a memory-capped scope of its own, outside this service.
+Environment=CLAUDE_CODE_SHELL_PREFIX=%h/duet-hub/systemd/run-command.sh
+# A process the kernel kills for memory (one that escaped the scopes) doesn't take the whole hub down with it.
+OOMPolicy=continue
+ExecStart=@NODE@ --experimental-strip-types src/main.ts
+Restart=on-failure
+RestartSec=3
+# SIGTERM makes the hub stop the lead and close clients; give it time before SIGKILL.
+TimeoutStopSec=20
+# stdout/stderr go to the journal: journalctl --user -u duet-hub
+
+[Install]
+WantedBy=default.target
