@@ -8,6 +8,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Dialogue, LEAD, type FleetPort } from '../src/dialogue.ts';
 import { droppedAtStart, Lead, SPOKEN_NOTE, VOICE_GUIDANCE, type Image } from '../src/lead.ts';
+import { attachClaude } from './claude-session.ts';
 import type { EventBody, HubEvent, Notes } from '../src/protocol.ts';
 import { StateFile } from '../src/store.ts';
 
@@ -41,20 +42,20 @@ function setup() {
   d.attach(fleet, { busy: () => lead.busyNow, submit: (text, by) => lead.submit(text, by), conversation: () => 'conv-1', userWaiting: () => lead.userWaiting() });
   // What Claude Code was sent.
   const sent: { text: string; images: Image[] }[] = [];
-  lead['input'] = { push: (text: string, images: Image[] = []) => sent.push({ text, images }) } as never;
+  const claude = attachClaude(lead, (text, images = []) => void sent.push({ text, images }));
   // Claude is in turn 5, waiting on t-1.
   lead['busy'] = true;
   lead['turn'] = 5;
   /** Claude Code takes a message: its UserPromptSubmit hook, with the words it was sent. */
   const take = async (prompt: string) => {
-    const out = (await lead['beforePrompt']({ hook_event_name: 'UserPromptSubmit', session_id: 's', transcript_path: '', cwd: '', prompt } as never, undefined, signal())) as {
+    const out = (await claude['beforePrompt']({ hook_event_name: 'UserPromptSubmit', session_id: 's', transcript_path: '', cwd: '', prompt } as never, undefined, signal())) as {
       hookSpecificOutput?: { additionalContext?: string };
     };
     return out.hookSpecificOutput?.additionalContext ?? '';
   };
-  const endTurn = () => lead['handle']({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1000, num_turns: 3 } as never);
+  const endTurn = () => claude.handle({ type: 'result', subtype: 'success', is_error: false, duration_ms: 1000, num_turns: 3 } as never);
   const of = <T extends EventBody['type']>(type: T) => events.filter((e): e is Extract<EventBody, { type: T }> => e.type === type);
-  return { d, lead, events, of, taken, sent, take, endTurn, idle: () => idle, turnStarts: () => turnStarts };
+  return { d, lead, claude, events, of, taken, sent, take, endTurn, idle: () => idle, turnStarts: () => turnStarts };
 }
 
 // ---- 1. await_workers ----
@@ -198,9 +199,9 @@ test("a command held for the turn's end waits visibly too, and is taken when it 
 });
 
 test('what Claude Code took unseen is marked taken once it is idle, so nothing waits for ever', () => {
-  const { lead, of } = setup();
+  const { lead, claude, of } = setup();
   lead.submit('reworded somewhere', 'mac');
-  lead['handle']({ type: 'system', subtype: 'session_state_changed', state: 'idle' } as never);
+  claude.handle({ type: 'system', subtype: 'session_state_changed', state: 'idle' } as never);
   assert.deepEqual(of('queued').map((e) => e.state), ['waiting', 'taken']);
   assert.equal(lead.userWaiting(), false);
 });

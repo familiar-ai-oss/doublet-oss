@@ -1,17 +1,16 @@
-// The lead: one long-lived Agent SDK session on the Max login.
-// Turns are 1:1 with prompts: the hub queues them while Claude Code can't take them, and sends what you write while
-// Claude works straight to Claude Code, which takes it at Claude's next tool call. Tool approvals go to clients via canUseTool.
-import { getSessionInfo, query } from '@anthropic-ai/claude-agent-sdk';
-import { claudeExecutable, claudePath, NO_CLAUDE } from './claude.ts';
-import type {
-  CanUseTool, HookCallback, HookCallbackMatcher, HookEvent, McpSdkServerConfigWithInstance, Options, PermissionResult, Query, SDKMessage,
-  SDKTaskNotificationMessage, SDKTaskProgressMessage, SDKTaskStartedMessage, SDKTaskUpdatedMessage, SDKUserMessage,
-} from '@anthropic-ai/claude-agent-sdk';
+// The lead: one long-lived session of a coding agent (Claude Code, through agents/claude.ts), whichever agent it is.
+// Turns are 1:1 with prompts: the hub queues them while the agent can't take them, and sends what you write while
+// it works straight to it (Claude Code takes it at Claude's next tool call). Tool approvals become cards on every device.
+import type { HookCallbackMatcher, HookEvent, McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
-import { PERMISSION_MODES, type EffortLevel, type EventBody, type HubEvent, type LeadModel, type Notes, type PermissionMode, type ToolCall, type ToolUse } from './protocol.ts';
-import { clip, resultText } from './worker.ts';
+import { PERMISSION_MODES, type EffortLevel, type EventBody, type HubEvent, type Notes, type PermissionMode, type ToolCall } from './protocol.ts';
 import type { StateFile } from './store.ts';
+import { Refused, type AgentAdapter, type AgentEvent, type AgentSession, type ApprovalAnswer, type Image, type SessionHost, type SessionOptions } from './agents/adapter.ts';
+import { ClaudeAdapter, type ClaudeExtras } from './agents/claude.ts';
+
+export type { Image } from './agents/adapter.ts';
+export { LOST_AFTER_MS, LOST_NOTE } from './agents/claude.ts';
 
 export type LeadConfig = {
   model: string;
@@ -22,9 +21,13 @@ export type LeadConfig = {
   // Built-in tools Claude doesn't get.
   disallowedTools?: string[];
   log: (msg: string) => void;
-  // Dialogue layer (Phase 3). A factory, because a restarted session needs fresh MCP server instances.
+  // Dialogue layer (Phase 3), for Claude Code. A factory, because a restarted session needs fresh MCP server instances.
   mcpServers?: () => Record<string, McpSdkServerConfigWithInstance>;
   hooks?: Partial<Record<HookEvent, HookCallbackMatcher[]>>;
+  /** The agent that leads. Default: Claude Code, with mcpServers and hooks above. */
+  adapter?: AgentAdapter;
+  /** Claude Code reaches mcpServers through the hub's gateway, as other agents do, instead of in-process. */
+  mcpGateway?: ClaudeExtras['gateway'];
   onTurnStart?: () => void;
   onIdle?: () => void;
   /** Handwritten notes reached Claude in this turn (at its start, or after a tool call mid-turn). */
@@ -60,69 +63,12 @@ export type SubagentOutcome = {
   edits?: { files: number; added: number; removed: number };
 };
 
-/** How long a background subagent can be missing from Claude Code's list of running work, with no end notice, before
- *  it ends as lost. */
-export const LOST_AFTER_MS = 30_000;
-export const LOST_NOTE = "Doublet lost track of this subagent: Claude Code stopped listing it as running and never said how it ended.";
-const LATE_NOTE = "Claude Code said this subagent ended, but its report never reached Doublet.";
-
-/** Claude Code's word for how a subagent's task ended, as a task state. */
-const ENDED: Record<SDKTaskNotificationMessage['status'], 'done' | 'failed' | 'cancelled'> = { completed: 'done', failed: 'failed', stopped: 'cancelled' };
-
-type AgentUsage = { total_tokens: number; tool_uses: number; duration_ms: number };
-
-/** One of Claude's subagents as the hub follows it in Claude Code, by the Agent call that started it, until it ends. */
-type AgentRun = {
-  /** Claude Code's task id for it (task_started). */
-  taskId?: string;
-  /** It runs in the background: its call returned at once, and its end comes as a notice. */
-  background: boolean;
-  /** For a subagent's own subagent: the Agent call of the subagent that started it. */
-  parent?: string;
-  /** Claude Code said it ended (task_updated), with its notice to follow. */
-  endedAs?: 'completed' | 'failed' | 'killed';
-  usage?: AgentUsage;
-  /** Missing from Claude Code's running work: it's lost when this fires, unless it comes back or ends first. */
-  missing?: NodeJS.Timeout;
-};
-
-/** A subagent's report from its end notice: what it handed back (with any warning Claude Code put on it), else what
- *  it said last (Claude Code's summary of a subagent). Empty: the task's result is the summary. */
-function handedBack(m: SDKTaskNotificationMessage): string {
-  const h = (m as { handback_report?: unknown }).handback_report;
-  if (typeof h === 'string') return h;
-  if (!h || typeof h !== 'object' || typeof (h as { text?: unknown }).text !== 'string') return '';
-  const { text, warning } = h as { text: string; warning?: unknown };
-  return typeof warning === 'string' && warning ? `${warning}\n${text}` : text;
-}
-
-/** The parts of the SDK's AgentOutput that Duet shows. */
-function subagentOutcome(r: unknown): SubagentOutcome | undefined {
-  if (!r || typeof r !== 'object') return undefined;
-  const o = r as Record<string, any>;
-  if (o.status !== 'completed' || !Array.isArray(o.content)) return undefined;
-  const u = o.usage ?? {};
-  return {
-    report: o.content.map((c: { text?: string }) => c.text ?? '').join('\n').trim(),
-    inputTokens: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0),
-    outputTokens: u.output_tokens ?? 0,
-    toolUses: o.totalToolUseCount ?? 0,
-    durationMs: o.totalDurationMs ?? 0,
-    model: o.resolvedModel,
-    ...(o.toolStats ? { edits: { files: o.toolStats.editFileCount ?? 0, added: o.toolStats.linesAdded ?? 0, removed: o.toolStats.linesRemoved ?? 0 } } : {}),
-  };
-}
-
-/** Claude Code's tool for starting a subagent (called Task in older versions). */
-const AGENT_TOOLS = new Set(['Agent', 'Task']);
-
 /** Claude asks to leave plan mode with its plan, which Claude Code reads from its plan file into the call's input. */
 const EXIT_PLAN = 'ExitPlanMode';
 
 const isMode = (m: unknown): m is PermissionMode => (PERMISSION_MODES as readonly unknown[]).includes(m);
 
-type Pending = { resolve: (r: PermissionResult) => void; input: Record<string, unknown>; tool: string; toolUseId?: string };
-export type Image = { data: string; type: 'image/png' | 'image/jpeg' };
+type Pending = { resolve: (a: ApprovalAnswer) => void; input: Record<string, unknown>; tool: string; toolUseId?: string };
 // held: shown to the user as waiting for Claude (a `queued` event) until Claude takes it. sent: the words as Claude
 // Code got them, for one sent while Claude works.
 type Queued = { text: string; by: string; images?: Image[]; notes?: Notes; noteIds?: string[]; voice?: boolean; held?: string; sent?: string };
@@ -165,12 +111,6 @@ function describeEdit(e: Edit): string {
   return `${lead}. It ran with this input instead of yours: ${JSON.stringify(e.ran)}`;
 }
 
-function withHooks(base: LeadConfig['hooks'], extra: Partial<Record<HookEvent, HookCallbackMatcher[]>>): Partial<Record<HookEvent, HookCallbackMatcher[]>> {
-  const out: Partial<Record<HookEvent, HookCallbackMatcher[]>> = { ...base };
-  for (const [k, v] of Object.entries(extra) as [HookEvent, HookCallbackMatcher[]][]) out[k] = [...(out[k] ?? []), ...v];
-  return out;
-}
-
 // CLAUDE_CODE_SHELL_PREFIX runs each command in a memory-capped scope (systemd/run-command.sh), for the lead and the
 // workers alike; DBUS_SESSION_BUS_ADDRESS and DUET_COMMAND_MEMORY_MAX go with it.
 const ENV_KEEP = ['HOME', 'PATH', 'USER', 'LOGNAME', 'SHELL', 'LANG', 'TERM', 'XDG_RUNTIME_DIR', 'TMPDIR',
@@ -203,36 +143,9 @@ export function leadEnv(): Record<string, string> {
   return env;
 }
 
-// Async iterable the SDK reads user turns from; stays open for the life of the session.
-class InputQueue implements AsyncIterable<SDKUserMessage> {
-  private items: SDKUserMessage[] = [];
-  private wake: (() => void) | null = null;
-  private closed = false;
-  push(text: string, images: Image[] = []): void {
-    // Images go first, so the text can refer to them.
-    const content = images.length
-      ? [...images.map((i) => ({ type: 'image' as const, source: { type: 'base64' as const, media_type: i.type, data: i.data } })), { type: 'text' as const, text }]
-      : text;
-    this.items.push({ type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: '', origin: { kind: 'human' } } as SDKUserMessage);
-    this.wake?.();
-  }
-  close(): void {
-    this.closed = true;
-    this.wake?.();
-  }
-  async *[Symbol.asyncIterator](): AsyncIterator<SDKUserMessage> {
-    while (true) {
-      while (this.items.length) yield this.items.shift()!;
-      if (this.closed) return;
-      await new Promise<void>((r) => (this.wake = r));
-      this.wake = null;
-    }
-  }
-}
-
 export class Lead {
-  private q: Query | null = null;
-  private input: InputQueue | null = null;
+  private readonly adapter: AgentAdapter;
+  private session: AgentSession | null = null;
   private queue: Queued[] = [];
   /** Prompts and notes sent while Claude works, oldest first: Claude Code takes each at Claude's next tool call (or as
    *  the next turn) as a message from the user, and its UserPromptSubmit hook says when. */
@@ -263,16 +176,8 @@ export class Lead {
   private voiceTurn = false;
   private lastPromptVoice = false;
   private notices: string[] = [];
-  /** Claude's subagents running in Claude Code, by the Agent call that started each, and Claude Code's task ids for them. */
-  private runs = new Map<string, AgentRun>();
-  private runOf = new Map<string, string>();
-  /** task_started for an Agent call of Claude's that the hub hasn't seen yet (the call's message comes first, normally). */
-  private early = new Map<string, SDKTaskStartedMessage>();
-  /** Claude Code's live background tasks (their task ids): the whole set each time it changes. Unknown until it first
-   *  says, in each of its processes. */
-  private backgroundSet: Set<string> | null = null;
-
   private cfg: LeadConfig;
+  private host: SessionHost;
   private emit: (e: EventBody) => void;
   private state: StateFile;
 
@@ -287,6 +192,15 @@ export class Lead {
     this.sessionId = st.leadSessionId;
     this.sessionCreated = !!this.sessionId;
     this.mode = isMode(st.permissionMode) ? st.permissionMode : 'default';
+    this.adapter = cfg.adapter ?? new ClaudeAdapter({ mcpServers: cfg.mcpServers, hooks: cfg.hooks, gateway: cfg.mcpGateway });
+    // What the session calls back with. Its events arrive in the order they happen.
+    this.host = {
+      event: (e) => this.onEvent(e),
+      beforePrompt: (prompt) => this.beforePrompt(prompt),
+      afterTool: (toolUseId) => this.afterTool(toolUseId),
+      subagents: cfg.subagents,
+      log: (msg) => cfg.log(msg),
+    };
   }
 
   /** The folder Claude works in. */
@@ -317,88 +231,56 @@ export class Lead {
     // A new conversation is named here, not by Claude Code on its first turn, so its first events carry the id.
     if (!this.sessionId) this.sessionId = randomUUID();
     this.emit({ type: 'session', state: 'starting', sessionId: this.sessionId, model: this.cfg.model });
-    if (!claudePath()) {
-      this.emit({ type: 'error', message: NO_CLAUDE });
-      this.emit({ type: 'session', state: 'stopped', reason: NO_CLAUDE });
-      throw new Error(NO_CLAUDE);
+    const session = this.adapter.open(this.sessionOptions(), this.host);
+    const cannot = session.preflight();
+    if (cannot) {
+      this.emit({ type: 'error', message: cannot });
+      this.emit({ type: 'session', state: 'stopped', reason: cannot });
+      throw new Error(cannot);
     }
-    this.input = new InputQueue();
-    this.q = query({ prompt: this.input, options: this.options() });
-
-    // With DUET_LEAD_AUTH set, check the login before accepting any prompt.
-    const account = await this.q.accountInfo();
-    const auth = leadAuth();
-    const plan = account.apiProvider === 'firstParty' && !!account.subscriptionType;
-    if ((auth === 'subscription' && !plan) || (auth === 'max' && !(plan && /max/i.test(account.subscriptionType ?? '')))) {
-      const reason = `DUET_LEAD_AUTH=${auth}, but Claude Code is signed in with subscription=${account.subscriptionType}, provider=${account.apiProvider}`;
-      this.emit({ type: 'error', message: reason });
-      this.emit({ type: 'session', state: 'stopped', reason });
-      this.input.close();
-      throw new Error(reason);
+    this.session = session;
+    let account: { subscription?: string };
+    try {
+      account = await session.start();
+    } catch (e) {
+      // It won't run (DUET_LEAD_AUTH rules its sign-in out): said once, and no restart.
+      if (!(e instanceof Refused)) throw e;
+      this.emit({ type: 'error', message: e.message });
+      this.emit({ type: 'session', state: 'stopped', reason: e.message });
+      throw new Error(e.message);
     }
-    this.emit({ type: 'session', state: 'ready', sessionId: this.sessionId, model: this.model, account: { subscription: account.subscriptionType } });
+    this.emit({ type: 'session', state: 'ready', sessionId: this.sessionId, model: this.model, account: { subscription: account.subscription } });
     await this.publishInfo();
-    void this.pump(this.q);
+    void session.run();
   }
 
-  /** A session's options: built for each start, since a restarted session needs fresh MCP server instances. */
-  private options(): Options {
+  /** What a new session of the agent starts with: built for each start (the folder, model and mode may have changed). */
+  private sessionOptions(): SessionOptions {
     return {
-      cwd: this.cfg.cwd,
-      // Claude Code says when nothing at all runs any more, background work included (session_state_changed idle).
-      ...claudeExecutable(),
-      env: { ...leadEnv(), CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS: '1' },
-      model: this.model,
-      effort: this.effort,
-      settingSources: [],
-      settings: { crossSessionInbound: 'refuse' },
-      // Bypass Permissions can only be switched on later in a session that starts allowing it.
-      permissionMode: this.mode,
-      allowDangerouslySkipPermissions: true,
-      allowedTools: this.cfg.autoAllow,
-      ...(this.cfg.disallowedTools?.length ? { disallowedTools: this.cfg.disallowedTools } : {}),
-      canUseTool: this.ask,
-      mcpServers: this.cfg.mcpServers?.(),
-      hooks: withHooks(this.cfg.hooks, {
-        PostToolUse: [{ hooks: [this.afterTool] }],
-        PostToolUseFailure: [{ hooks: [this.afterTool] }],
-        UserPromptSubmit: [{ hooks: [this.beforePrompt] }],
-      }),
-      includePartialMessages: true,
-      // Resume a session Claude Code has; give a new one its id (the two options exclude each other).
-      ...(this.sessionCreated ? { resume: this.sessionId } : { sessionId: this.sessionId }),
-      stderr: (d) => this.cfg.log(`[claude] ${d.trimEnd()}`),
+      sessionId: this.sessionId!, resume: this.sessionCreated, cwd: this.cfg.cwd, model: this.model, effort: this.effort, mode: this.mode,
+      autoAllow: this.cfg.autoAllow, ...(this.cfg.disallowedTools?.length ? { disallowedTools: this.cfg.disallowedTools } : {}),
     };
   }
 
-  // Each call that needs an OK becomes an approval card on every device. Leaving plan mode carries the plan.
-  private ask: CanUseTool = (tool, input, opts) =>
-    new Promise<PermissionResult>((resolve) => {
-      const id = randomUUID().slice(0, 8);
-      this.pending.set(id, { resolve, input, tool, toolUseId: opts.toolUseID });
-      const plan = tool === EXIT_PLAN && typeof input.plan === 'string' ? input.plan : undefined;
-      this.emit({
-        type: 'approval_request', id, turn: this.turn, tool, input, title: opts.title, description: opts.description,
-        toolUseId: opts.toolUseID, displayName: opts.displayName, defaultToNo: opts.defaultToNo || undefined, ...(plan !== undefined ? { plan } : {}),
-      });
-      opts.signal.addEventListener('abort', () => this.settle(id, { behavior: 'deny', message: 'Aborted' }, 'deny', false, 'abort'));
-    });
 
-  private async pump(q: Query): Promise<void> {
-    try {
-      for await (const m of q) this.handle(m);
-      this.cfg.log('lead stream ended');
-    } catch (err) {
-      this.emit({ type: 'error', message: `lead session failed: ${String(err).slice(0, 500)}` });
-    }
-    for (const id of [...this.pending.keys()]) this.settle(id, { behavior: 'deny', message: 'Session ended' }, 'deny', false, 'session_end');
-    // Claude's subagents run in Claude Code's process: they stopped with it. The next process says nothing of its
-    // background work until that changes.
-    this.cfg.subagents?.stopped(true);
-    for (const id of [...this.runs.keys()]) this.forget(id);
-    this.early.clear();
-    this.backgroundSet = null;
-    // Sent to a Claude Code that's gone: the next one gets them.
+  // Each call that needs an OK becomes an approval card on every device. Leaving plan mode carries the plan.
+  private approval(e: Extract<AgentEvent, { type: 'approval' }>): void {
+    const id = randomUUID().slice(0, 8);
+    this.pending.set(id, { resolve: e.respond, input: e.input, tool: e.tool, toolUseId: e.toolUseId });
+    const plan = e.tool === EXIT_PLAN && typeof e.input.plan === 'string' ? e.input.plan : undefined;
+    this.emit({
+      type: 'approval_request', id, turn: this.turn, tool: e.tool, input: e.input, title: e.title, description: e.description,
+      toolUseId: e.toolUseId, displayName: e.displayName, defaultToNo: e.defaultToNo || undefined, ...(plan !== undefined ? { plan } : {}),
+    });
+    e.onWithdrawn(() => this.settle(id, { allow: false, message: 'Aborted' }, 'deny', false, 'abort'));
+  }
+
+  /** The agent's process ended: what it held is denied or handed to the next one, which starts in 3 s. */
+  private closed(error: string | undefined): void {
+    if (error) this.emit({ type: 'error', message: error });
+    for (const id of [...this.pending.keys()]) this.settle(id, { allow: false, message: 'Session ended' }, 'deny', false, 'session_end');
+    this.session?.release();
+    // Sent to an agent that's gone: the next one gets them.
     this.queue.unshift(...this.pushed.splice(0));
     if (this.busy) {
       this.emit({ type: 'turn_end', turn: this.turn, subtype: 'session_ended', isError: true, interrupted: this.interrupted });
@@ -420,10 +302,10 @@ export class Lead {
 
   // Model list and the effort levels each one accepts, for the app's pickers.
   private async publishInfo(): Promise<void> {
-    if (!this.q) return;
-    let models: LeadModel[] = [];
+    if (!this.session) return;
+    let models: Awaited<ReturnType<AgentSession['models']>> = [];
     try {
-      models = (await this.q.supportedModels()).map((m) => ({ value: m.value, displayName: m.displayName, effortLevels: m.supportedEffortLevels ?? [], resolved: m.resolvedModel }));
+      models = await this.session.models();
     } catch (e) {
       this.cfg.log(`supportedModels failed: ${e}`);
     }
@@ -431,126 +313,62 @@ export class Lead {
     this.emit({ type: 'lead_info', model: this.model, effort: this.effort, models, cwd: this.cfg.cwd, recentCwds: st.recentCwds ?? [], conversationId: this.sessionId, permissionMode: this.mode });
   }
 
-  private handle(m: SDKMessage): void {
-    switch (m.type) {
-      case 'system':
-        if (m.subtype === 'compact_boundary') {
-          this.emit({ type: 'context', action: 'compacted', by: this.compactBy ?? 'auto', preTokens: m.compact_metadata.pre_tokens, postTokens: m.compact_metadata.post_tokens });
-          this.compactBy = null;
-          return;
+  private onEvent(e: AgentEvent): void {
+    switch (e.type) {
+      case 'activity':
+        return this.ownTurn();
+      case 'ready':
+        if (e.sessionId !== this.sessionId) {
+          // The agent chose another id (it shouldn't: the hub names new sessions and resumes old ones). Follow it.
+          this.cfg.log(`lead session is ${e.sessionId}, not ${this.sessionId}; following the agent`);
+          this.sessionId = e.sessionId;
+          this.emit({ type: 'session', state: 'ready', sessionId: e.sessionId, model: this.model });
         }
-        if (m.subtype === 'status') {
-          // Claude Code says whenever the mode changes: set from a device, or by Claude leaving plan mode.
-          if (m.permissionMode) this.followMode(m.permissionMode);
-          return;
-        }
-        if (m.subtype === 'init') {
-          this.followMode(m.permissionMode);
-          if (leadAuth() !== 'any' && m.apiKeySource !== 'none') {
-            this.emit({ type: 'error', message: `lead apiKeySource is ${m.apiKeySource}, but DUET_LEAD_AUTH=${leadAuth()} expects a Claude plan; stopping` });
-            void this.stop();
-            return;
-          }
-          if (m.session_id !== this.sessionId) {
-            // Claude Code chose another id (it shouldn't: the hub names new sessions and resumes old ones). Follow it.
-            this.cfg.log(`lead session is ${m.session_id}, not ${this.sessionId}; following Claude Code`);
-            this.sessionId = m.session_id;
-            this.emit({ type: 'session', state: 'ready', sessionId: m.session_id, model: this.model });
-          }
-          if (!this.sessionCreated) {
-            // Claude Code has the transcript now: a restart resumes it. (Not before: resuming a session with no
-            // transcript fails, and a hub that died before the first turn would crash-loop.)
-            this.sessionCreated = true;
-            this.state.write({ ...this.state.read(), leadSessionId: this.sessionId });
-          }
-          return;
-        }
-        // Claude's subagents as Claude Code runs them: started, sent to the background, ended.
-        if (m.subtype === 'task_started') return this.taskStarted(m);
-        if (m.subtype === 'task_updated') return this.taskUpdated(m);
-        if (m.subtype === 'task_progress') return this.taskProgress(m);
-        if (m.subtype === 'task_notification') return this.taskNotified(m);
-        if (m.subtype === 'background_tasks_changed') return this.backgroundChanged(m.tasks.map((t) => t.task_id));
-        // Idle: nothing runs in Claude Code any more, background work included. (Claude Code says "running" for as long as
-        // background work runs, so it doesn't mark the turns it starts itself: ownTurn() does.)
-        if (m.subtype === 'session_state_changed' && m.state === 'idle') {
-          this.unseen();
-          return this.settled();
+        if (!this.sessionCreated) {
+          // The agent has the transcript now: a restart resumes it. (Not before: resuming a session with no
+          // transcript fails, and a hub that died before the first turn would crash-loop.)
+          this.sessionCreated = true;
+          this.state.write({ ...this.state.read(), leadSessionId: this.sessionId });
         }
         return;
-      case 'stream_event': {
-        if (m.parent_tool_use_id !== null) return;
-        this.ownTurn();
-        const ev = m.event;
-        if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') {
-          this.emit({ type: 'text_delta', turn: this.turn, text: ev.delta.text });
-        }
+      case 'mode':
+        return this.followMode(e.mode);
+      case 'fatal':
+        this.emit({ type: 'error', message: e.message });
+        void this.stop();
         return;
+      case 'compacted':
+        this.emit({ type: 'context', action: 'compacted', by: this.compactBy ?? 'auto', preTokens: e.preTokens, postTokens: e.postTokens });
+        this.compactBy = null;
+        return;
+      case 'idle':
+        return this.unseen();
+      case 'text':
+        return this.emit({ type: 'text_delta', turn: this.turn, text: e.delta });
+      case 'message':
+        return this.emit({ type: 'assistant', turn: this.turn, text: e.text, toolUses: e.toolUses });
+      case 'tool_end': {
+        // Long output: its end too, where a run's verdict usually is (devices summarize it in one line).
+        const raw = e.output;
+        const tail = raw.length > 2000 ? raw.slice(Math.max(2000, raw.length - 1500)) : undefined;
+        return this.emit({ type: 'tool_result', turn: this.turn, toolUseId: e.toolUseId, isError: e.isError, preview: raw.slice(0, 2000), ...(tail ? { tail } : {}) });
       }
-      case 'assistant': {
-        const blocks = m.message.content;
-        const text = blocks.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
-        if (m.parent_tool_use_id !== null) {
-          // One of Claude's subagents at work: its task's progress.
-          const u = m.message.usage;
-          this.cfg.subagents?.progress(m.parent_tool_use_id, {
-            text: text || undefined,
-            toolUses: blocks.flatMap((b) => (b.type === 'tool_use' ? [{ name: b.name, input: clip(b.input) }] : [])),
-            usage: u ? { messageId: m.message.id, input: (u.input_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0), output: u.output_tokens ?? 0 } : undefined,
-          });
-          return;
-        }
+      case 'approval':
+        return this.approval(e);
+      case 'turn_end':
+        // No turn open and no model call in it: a queued command the agent ran without the model, which ends nothing.
+        if (!this.busy && !e.numTurns) return;
         this.ownTurn();
-        const toolUses: ToolUse[] = blocks.flatMap((b) => (b.type === 'tool_use' ? [{ id: b.id, name: b.name, input: b.input }] : []));
-        if (text || toolUses.length) this.emit({ type: 'assistant', turn: this.turn, text, toolUses });
-        for (const u of toolUses) {
-          if (!AGENT_TOOLS.has(u.name)) continue;
-          const input = (u.input ?? {}) as { prompt?: unknown; subagent_type?: unknown; description?: unknown };
-          if (!this.runs.has(u.id)) this.runs.set(u.id, { background: false });
-          const label = typeof input.description === 'string' && input.description.trim() ? input.description.trim() : undefined;
-          this.cfg.subagents?.start(u.id, typeof input.subagent_type === 'string' && input.subagent_type ? input.subagent_type : 'general-purpose', String(input.prompt ?? ''), label ? { label } : {});
-          const early = this.early.get(u.id);
-          if (early) {
-            this.early.delete(u.id);
-            this.taskStarted(early);
-          }
-        }
-        return;
-      }
-      case 'user': {
-        if (!Array.isArray(m.message.content)) return;
-        for (const b of m.message.content) {
-          if (typeof b !== 'object' || !b || b.type !== 'tool_result') continue;
-          if (m.parent_tool_use_id !== null) {
-            this.cfg.subagents?.progress(m.parent_tool_use_id, { toolResult: resultText(b.content).slice(0, 500) });
-            continue;
-          }
-          this.ownTurn();
-          const raw = typeof b.content === 'string' ? b.content : JSON.stringify(b.content ?? '');
-          // A subagent's report, or word that it went to the background (before the tool result, so clients know the row
-          // is the task's).
-          if (this.cfg.subagents?.isSubagent(b.tool_use_id)) this.agentResult(b.tool_use_id, !!b.is_error, b.content, (m as { tool_use_result?: unknown }).tool_use_result);
-          // Long output: its end too, where a run's verdict usually is (devices summarize it in one line).
-          const tail = raw.length > 2000 ? raw.slice(Math.max(2000, raw.length - 1500)) : undefined;
-          this.emit({ type: 'tool_result', turn: this.turn, toolUseId: b.tool_use_id, isError: !!b.is_error, preview: raw.slice(0, 2000), ...(tail ? { tail } : {}) });
-        }
-        return;
-      }
-      case 'result':
-        // No turn open and no model call in it: a queued command Claude Code ran without the model, which ends nothing.
-        if (!this.busy && !m.num_turns) return;
-        this.ownTurn();
-        // The subagents Claude waited on were cut off; those in the background run on, and end with their own notices.
-        this.cfg.subagents?.stopped();
-        for (const [id, run] of this.runs) if (!run.background && !run.parent) this.forget(id);
-        this.early.clear();
-        this.emit({ type: 'turn_end', turn: this.turn, subtype: m.subtype, isError: m.is_error, interrupted: this.interrupted, durationMs: m.duration_ms, numTurns: m.num_turns });
+        this.session?.endTurn();
+        this.emit({ type: 'turn_end', turn: this.turn, subtype: e.subtype, isError: e.isError, interrupted: this.interrupted, durationMs: e.durationMs, numTurns: e.numTurns });
         this.busy = false;
         this.interrupted = false;
-        // What Claude Code still holds is the next turn, which it starts itself.
+        // What the agent still holds is the next turn, which it starts itself.
         this.dispatch();
         if (!this.busy && !this.pushed.length) this.cfg.onIdle?.();
         return;
+      case 'closed':
+        return this.closed(e.error);
     }
   }
 
@@ -565,136 +383,9 @@ export class Lead {
     this.turnNotes = [];
     // Read aloud as the hub's own turns are: as the last prompt was.
     this.voiceTurn = this.lastPromptVoice;
-    this.cfg.log(`Claude Code started turn ${this.turn} by itself`);
+    this.cfg.log(`the agent started turn ${this.turn} by itself`);
     this.emit({ type: 'turn_start', turn: this.turn });
     this.cfg.onTurnStart?.();
-  }
-
-  /** An Agent call's result: the subagent's report, or word that it went to the background, where it runs on until its
-   *  own notice says it ended. */
-  private agentResult(id: string, isError: boolean, content: Parameters<typeof resultText>[0], out: unknown): void {
-    const run = this.runs.get(id) ?? { background: false };
-    this.runs.set(id, run);
-    const status = out && typeof out === 'object' ? (out as { status?: unknown }).status : undefined;
-    if (!isError && (status === 'async_launched' || (run.background && status !== 'completed'))) return this.toBackground(id, run);
-    this.forget(id);
-    this.cfg.subagents?.end(id, isError ? 'failed' : 'done', resultText(content), subagentOutcome(out));
-  }
-
-  /**
-   * Claude Code started a subagent's task. One of Claude's own Agent calls has its task already; a subagent's own
-   * subagent gets one here, under the task of the subagent that started it. Shells, monitors and workflows aren't
-   * followed (yet).
-   */
-  private taskStarted(m: SDKTaskStartedMessage): void {
-    const id = m.tool_use_id;
-    const agent = m.task_type ? m.task_type === 'local_agent' : !!m.subagent_type;
-    if (!id || !agent || m.subagent_type === 'main-session') return;
-    const own = this.runs.get(id);
-    const parent = m.parent_task_id ? this.runOf.get(m.parent_task_id) : undefined;
-    if (!own && !parent) {
-      // A call of Claude's whose message is still to come (kept until then, or the turn's end). Anything else was
-      // started by something the hub doesn't follow, such as an agent inside a workflow.
-      if (!m.parent_task_id && (m.spawn_depth ?? 1) <= 1) this.early.set(id, m);
-      return;
-    }
-    const run: AgentRun = own ?? { background: !!m.is_backgrounded, parent };
-    this.runs.set(id, run);
-    run.taskId = m.task_id;
-    this.runOf.set(m.task_id, id);
-    if (!own) {
-      this.cfg.subagents?.start(id, m.subagent_type || 'general-purpose', m.prompt || m.description, {
-        label: m.description || undefined, parent, ...(m.spawn_depth ? { depth: m.spawn_depth } : {}), ...(run.background ? { background: true } : {}),
-      });
-    } else if (m.is_backgrounded) {
-      this.toBackground(id, run);
-    }
-  }
-
-  private toBackground(id: string, run: AgentRun): void {
-    if (run.background) return;
-    run.background = true;
-    this.cfg.subagents?.background(id);
-  }
-
-  private taskUpdated(m: SDKTaskUpdatedMessage): void {
-    const id = this.runOf.get(m.task_id);
-    const run = id ? this.runs.get(id) : undefined;
-    if (!id || !run) return;
-    // Sent to the background mid-run: its call returns at once.
-    if (m.patch.is_backgrounded) this.toBackground(id, run);
-    const s = m.patch.status;
-    if (s === 'completed' || s === 'failed' || s === 'killed') run.endedAs = s;
-  }
-
-  private taskProgress(m: SDKTaskProgressMessage): void {
-    const id = m.tool_use_id ?? this.runOf.get(m.task_id);
-    const run = id ? this.runs.get(id) : undefined;
-    if (run) run.usage = m.usage;
-  }
-
-  /**
-   * A subagent's task ended. One Claude waits on ends with its Agent call's result instead, which has the whole
-   * outcome; one in the background, or a subagent's own, ends here, with its report and what it used.
-   */
-  private taskNotified(m: SDKTaskNotificationMessage): void {
-    const id = m.tool_use_id ?? this.runOf.get(m.task_id);
-    const run = id ? this.runs.get(id) : undefined;
-    if (!id || !run || (!run.background && !run.parent)) return;
-    this.finish(id, ENDED[m.status] ?? 'failed', m.summary ?? '', handedBack(m), m.usage ?? run.usage);
-  }
-
-  /** A subagent the hub followed ended: its task ends with its report (`report`, else `summary`) and its usage. */
-  private finish(id: string, state: 'done' | 'failed' | 'cancelled', summary: string, report: string, usage?: AgentUsage): void {
-    this.forget(id);
-    this.cfg.subagents?.end(id, state, summary, { report, toolUses: usage?.tool_uses ?? 0, durationMs: usage?.duration_ms ?? 0, ...(usage ? { totalTokens: usage.total_tokens } : {}) });
-  }
-
-  private forget(id: string): void {
-    const run = this.runs.get(id);
-    if (!run) return;
-    clearTimeout(run.missing);
-    if (run.taskId) this.runOf.delete(run.taskId);
-    this.runs.delete(id);
-  }
-
-  /** Claude Code's background work now: the whole set, each time it changes. A background subagent missing from it,
-   *  with no end notice, is lost once it has been missing for LOST_AFTER_MS. */
-  private backgroundChanged(taskIds: string[]): void {
-    this.backgroundSet = new Set(taskIds);
-    for (const [id, run] of this.runs) {
-      if (!run.background || !run.taskId) continue;
-      if (this.backgroundSet.has(run.taskId)) this.found(run);
-      else this.missing(id, run);
-    }
-  }
-
-  /** Nothing runs in Claude Code any more, background work included: a subagent still followed here was missed. (Those
-   *  Claude waited on ended with its turn.) */
-  private settled(): void {
-    for (const [id, run] of this.runs) {
-      if ((run.background || run.parent) && !(run.taskId && this.backgroundSet?.has(run.taskId))) this.missing(id, run);
-    }
-  }
-
-  private missing(id: string, run: AgentRun): void {
-    if (run.missing) return;
-    run.missing = setTimeout(() => this.lost(id), LOST_AFTER_MS);
-    run.missing.unref?.();
-  }
-
-  private found(run: AgentRun): void {
-    clearTimeout(run.missing);
-    run.missing = undefined;
-  }
-
-  /** Missing, with no end notice, for LOST_AFTER_MS: lost; or, if Claude Code said it ended, ended without its report. */
-  private lost(id: string): void {
-    const run = this.runs.get(id);
-    if (!run) return;
-    this.cfg.log(`subagent ${id} ended without a notice: Claude Code no longer runs it${run.endedAs ? ` (it said ${run.endedAs})` : ''}`);
-    const state = run.endedAs === 'completed' ? 'done' : run.endedAs === 'killed' ? 'cancelled' : 'failed';
-    this.finish(id, state, run.endedAs ? LATE_NOTE : LOST_NOTE, '', run.usage);
   }
 
   // Boost adds "ultrathink" to this one turn only. Voice: spoken in Talk mode, and the reply is read aloud.
@@ -714,7 +405,7 @@ export class Lead {
 
   /** Claude works, or Claude Code holds something for its next turn: what the user sends goes to Claude Code now. */
   private claudeWorks(): boolean {
-    return !!this.input && (this.busy || this.pushed.length > 0);
+    return !!this.session && (this.busy || this.pushed.length > 0);
   }
 
   /**
@@ -724,7 +415,7 @@ export class Lead {
   private send(q: Queued): void {
     q.sent = q.voice ? `${q.text}\n\n${SPOKEN_NOTE}` : q.text;
     this.pushed.push(q);
-    this.input!.push(q.sent, q.images);
+    this.session!.send(q.sent, q.images);
     this.cfg.onUserWaiting?.();
   }
 
@@ -790,7 +481,7 @@ export class Lead {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(sessionId)) throw new Error('not a session id');
     if (sessionId === this.sessionId) return;
     // Looked up before the busy check: nothing awaits between that check and closing the input.
-    const info = await getSessionInfo(sessionId).catch(() => null);
+    const info = await this.adapter.lookup(sessionId);
     if (!info) throw new Error(`no session ${sessionId}`);
     if (this.busyNow) throw new Error('a turn is running; stop it first');
     await this.stopQuietly();
@@ -808,10 +499,9 @@ export class Lead {
 
   /** Close the session and wait for its stream to end, without the automatic restart. */
   private async stopQuietly(): Promise<void> {
-    if (!this.q) return;
+    if (!this.session) return;
     this.restartQuietly = true;
-    this.input?.close();
-    this.q.close?.();
+    this.session.close();
     await new Promise<void>((r) => (this.onStopped = r));
   }
 
@@ -844,25 +534,24 @@ export class Lead {
     if (this.notices.length > 20) this.notices.shift();
   }
 
-  private beforePrompt: HookCallback = async (input) => {
+  /** The agent takes a prompt: what to tell it with it (a folder move, Talk mode, notices). */
+  private beforePrompt(prompt: unknown): string | undefined {
     // Something the user sent while Claude worked, which Claude Code takes now.
-    const prompt = (input as { prompt?: unknown }).prompt;
     const i = this.pushed.findIndex((q) => q.sent === prompt);
     if (i >= 0) this.taken(this.pushed.splice(i, 1)[0]);
     const parts = [this.folderNotice, this.voiceTurn ? VOICE_GUIDANCE : null, ...this.notices.splice(0)].filter((p): p is string => !!p);
     this.folderNotice = null;
     this.voiceTurn = false;
-    if (!parts.length) return {};
-    return { hookSpecificOutput: { hookEventName: 'UserPromptSubmit', additionalContext: parts.join('\n\n') } };
-  };
+    return parts.length ? parts.join('\n\n') : undefined;
+  }
 
   async setModel(model: string, by: string): Promise<void> {
-    if (!this.q) throw new Error('lead not running');
+    if (!this.session) throw new Error('lead not running');
     // Aliases ("haiku"), the ids they resolve to, and the model the hub started with are all accepted.
-    const rows = await this.q.supportedModels();
-    const known = new Set([...rows.map((m) => m.value), ...rows.flatMap((m) => (m.resolvedModel ? [m.resolvedModel] : [])), this.cfg.model]);
+    const rows = await this.session.models();
+    const known = new Set([...rows.map((m) => m.value), ...rows.flatMap((m) => (m.resolved ? [m.resolved] : [])), this.cfg.model]);
     if (!known.has(model)) throw new Error(`unknown model ${model}; choose one of ${rows.map((m) => m.value).join(', ')}`);
-    await this.q.setModel(model);
+    await this.session.setModel(model);
     this.model = model;
     this.cfg.log(`${by} set the lead model to ${model}`);
     await this.publishInfo();
@@ -871,7 +560,7 @@ export class Lead {
   /** How Claude asks before it acts. Takes effect at once, mid-turn too; with no session running, the next one starts in it. */
   async setPermissionMode(mode: PermissionMode, by: string): Promise<void> {
     if (!isMode(mode)) throw new Error(`unknown permission mode ${mode}; choose one of ${PERMISSION_MODES.join(', ')}`);
-    await this.q?.setPermissionMode(mode);
+    await this.session?.setMode(mode);
     this.cfg.log(`${by} set the permission mode to ${mode}`);
     this.keepMode(mode);
     await this.publishInfo();
@@ -891,7 +580,7 @@ export class Lead {
   }
 
   private dispatch(): void {
-    if (this.busy || !this.input || !this.queue.length || this.pushed.length) return;
+    if (this.busy || !this.session || !this.queue.length || this.pushed.length) return;
     const next = this.queue.shift()!;
     if (next.held) this.emit({ type: 'queued', id: next.held, state: 'taken' });
     this.busy = true;
@@ -905,7 +594,7 @@ export class Lead {
     if (next.noteIds?.length) this.cfg.onNotesTaken?.(next.noteIds, this.turn);
     // A spoken prompt carries the note itself, where it weighs more than a side note; the transcript shows only
     // what was said.
-    this.input.push(next.voice ? `${next.text}\n\n${SPOKEN_NOTE}` : next.text, next.images);
+    this.session.send(next.voice ? `${next.text}\n\n${SPOKEN_NOTE}` : next.text, next.images);
   }
 
   approve(id: string, by: string, updatedInput?: Record<string, unknown>): void {
@@ -914,17 +603,16 @@ export class Lead {
     const edited = !!updatedInput && stableJson(updatedInput) !== stableJson(p.input);
     // An edited plan Claude Code saves to its plan file, and tells Claude so itself.
     if (edited && p.toolUseId && p.tool !== EXIT_PLAN) this.edits.set(p.toolUseId, { tool: p.tool, original: p.input, ran: updatedInput! });
-    this.settle(id, { behavior: 'allow', updatedInput: updatedInput ?? p.input }, 'allow', edited, by, undefined, edited ? updatedInput : undefined);
+    this.settle(id, { allow: true, input: updatedInput ?? p.input }, 'allow', edited, by, undefined, edited ? updatedInput : undefined);
   }
 
   // After each tool call: tell whoever made it when a person changed what ran (it only sees the call it made).
-  private afterTool: HookCallback = async (input) => {
-    if (input.hook_event_name !== 'PostToolUse' && input.hook_event_name !== 'PostToolUseFailure') return {};
-    const e = this.edits.get(input.tool_use_id);
-    if (!e) return {};
-    this.edits.delete(input.tool_use_id);
-    return { hookSpecificOutput: { hookEventName: input.hook_event_name, additionalContext: describeEdit(e) } };
-  };
+  private afterTool(toolUseId: string): string | undefined {
+    const e = this.edits.get(toolUseId);
+    if (!e) return undefined;
+    this.edits.delete(toolUseId);
+    return describeEdit(e);
+  }
 
   // Handwritten notes, with the annotated picture. While Claude works they reach it at its next tool call, shown at
   // once where they came; otherwise they start a turn.
@@ -948,10 +636,10 @@ export class Lead {
     const reason = p.tool === EXIT_PLAN
       ? `The user wants you to keep planning${note ? `: ${note}` : ", and didn't say what to change. Ask them."}`
       : note ?? 'The user rejected this tool call.';
-    this.settle(id, { behavior: 'deny', message: reason }, 'deny', false, by, note);
+    this.settle(id, { allow: false, message: reason }, 'deny', false, by, note);
   }
 
-  private settle(id: string, r: PermissionResult, decision: 'allow' | 'deny', edited: boolean, by: string, message?: string, updatedInput?: Record<string, unknown>): void {
+  private settle(id: string, r: ApprovalAnswer, decision: 'allow' | 'deny', edited: boolean, by: string, message?: string, updatedInput?: Record<string, unknown>): void {
     const p = this.pending.get(id);
     if (!p) return;
     this.pending.delete(id);
@@ -960,17 +648,17 @@ export class Lead {
   }
 
   async interrupt(by: string): Promise<void> {
-    if (!this.busy || !this.q) throw new Error('no turn is running');
+    if (!this.busy || !this.session) throw new Error('no turn is running');
     this.interrupted = true;
     this.emit({ type: 'interrupt', turn: this.turn, by });
-    for (const id of [...this.pending.keys()]) this.settle(id, { behavior: 'deny', message: 'Interrupted by the user', interrupt: true }, 'deny', false, by, 'interrupted');
-    await this.q.interrupt();
+    for (const id of [...this.pending.keys()]) this.settle(id, { allow: false, message: 'Interrupted by the user', interrupt: true }, 'deny', false, by, 'interrupted');
+    await this.session.interrupt();
   }
 
   // Takes effect from the next turn (verified in spike 5).
   async setEffort(level: EffortLevel | null, by: string): Promise<void> {
-    if (!this.q) throw new Error('lead not running');
-    await this.q.applyFlagSettings({ effortLevel: level });
+    if (!this.session) throw new Error('lead not running');
+    await this.session.setEffort(level);
     this.effort = level ?? this.cfg.effort;
     this.emit({ type: 'effort', level, by, appliesFrom: 'next_turn' });
     await this.publishInfo();
@@ -978,7 +666,6 @@ export class Lead {
 
   async stop(): Promise<void> {
     this.stopping = true;
-    this.input?.close();
-    this.q?.close?.();
+    this.session?.close();
   }
 }

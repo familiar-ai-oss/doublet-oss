@@ -15,6 +15,7 @@ import { join } from 'node:path';
 import { Dialogue, LEAD, MAX_STOP_BLOCKS, YOU, formatPlan, leadGuidance, toolsLine, wrapTask, type FleetPort } from '../src/dialogue.ts';
 import { Fleet, pickAuto, readableOutside, takes, type WorkerDef } from '../src/fleet.ts';
 import { Lead } from '../src/lead.ts';
+import { attachClaude } from './claude-session.ts';
 import { describeProfiles, PROFILES, readOnlyRefusal } from '../src/profiles.ts';
 import type { EventBody, PlanStep } from '../src/protocol.ts';
 import { StateFile } from '../src/store.ts';
@@ -114,12 +115,12 @@ test("Claude's subagents can't use the duet tools; Claude can, and the subagents
 test("your notes go to Claude Code as your message, never a subagent's hook; an edited call's notice goes to whoever made it", async () => {
   const lead = new Lead({ model: 'haiku', effort: 'low', cwd: '/tmp', autoAllow: [], log: () => {} }, () => {}, new StateFile('/nonexistent'), 0);
   const sent: string[] = [];
-  lead['input'] = { push: (text: string) => sent.push(text) } as never;
+  const claude = attachClaude(lead, (text) => void sent.push(text));
   lead['busy'] = true;
   lead.addNotes('ipad', { surface: { kind: 'file', path: '/tmp/a.ts' }, items: [{ id: 'n1', intent: 'comment', text: 'rename this' }] }, 'Note: rename this');
   assert.deepEqual(sent, ['Note: rename this'], 'Claude Code hands it to Claude itself, at its own next tool call');
   lead['edits'].set('u-sub', { tool: 'Bash', original: { command: 'ls' }, ran: { command: 'ls -la' } });
-  const after = (input: Record<string, unknown>) => lead['afterTool']({ hook_event_name: 'PostToolUse', session_id: 's', transcript_path: '', cwd: '', tool_name: 'Bash', tool_input: {}, tool_response: '', ...input } as never, undefined, signal()) as Promise<{ hookSpecificOutput?: { additionalContext?: string } }>;
+  const after = (input: Record<string, unknown>) => claude['afterTool']({ hook_event_name: 'PostToolUse', session_id: 's', transcript_path: '', cwd: '', tool_name: 'Bash', tool_input: {}, tool_response: '', ...input } as never, undefined, signal()) as Promise<{ hookSpecificOutput?: { additionalContext?: string } }>;
   const sub = await after({ tool_use_id: 'u-sub', agent_id: 'agent-1' });
   assert.match(sub.hookSpecificOutput?.additionalContext ?? '', /edited this Bash call/, 'the subagent hears its call was edited');
   assert.doesNotMatch(sub.hookSpecificOutput?.additionalContext ?? '', /rename this/, 'but not your note');

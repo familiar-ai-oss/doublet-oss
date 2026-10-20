@@ -3,6 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { Lead, SPOKEN_NOTE, VOICE_GUIDANCE } from '../src/lead.ts';
+import { attachClaude } from './claude-session.ts';
 import type { EventBody } from '../src/protocol.ts';
 import { StateFile } from '../src/store.ts';
 
@@ -10,10 +11,10 @@ function setup() {
   const events: EventBody[] = [];
   const lead = new Lead({ model: 'haiku', effort: 'low', cwd: '/tmp', autoAllow: [], log: () => {} }, (e) => events.push(e), new StateFile('/nonexistent'), 0);
   const sent: string[] = [];
-  lead['input'] = { push: (text: string) => sent.push(text) } as never;
+  const claude = attachClaude(lead, (text) => void sent.push(text));
   // One turn: dispatch the next prompt, run its UserPromptSubmit hook, then finish the turn.
   const turn = async () => {
-    const out = (await lead['beforePrompt']({ hook_event_name: 'UserPromptSubmit', prompt: sent.at(-1) } as never, undefined, { signal: new AbortController().signal })) as {
+    const out = (await claude['beforePrompt']({ hook_event_name: 'UserPromptSubmit', prompt: sent.at(-1) } as never, undefined, { signal: new AbortController().signal })) as {
       hookSpecificOutput?: { additionalContext?: string };
     };
     lead['busy'] = false;

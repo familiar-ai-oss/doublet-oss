@@ -583,11 +583,18 @@ public struct HubEvent: Codable, Sendable, Equatable {
 
 /// A coding agent on the hub's machine, from its scan: Claude Code, Codex CLI, Cursor CLI or Gemini CLI.
 public struct AgentInfo: Codable, Sendable, Equatable, Hashable, Identifiable {
-    public enum State: String, Codable, Sendable { case ready, needsSignIn = "needs_sign_in", notInstalled = "not_installed" }
-    /// "claude", "codex", "cursor" or "gemini".
+    /// `blocked`: signed in only in a way its terms don't let Doublet use (a personal Google plan for Antigravity or
+    /// Gemini CLI); `signIn` says what would work. A state this version doesn't know reads as `needsSignIn`.
+    public enum State: String, Codable, Sendable {
+        case ready, needsSignIn = "needs_sign_in", notInstalled = "not_installed", blocked
+        public init(from decoder: Decoder) throws {
+            self = State(rawValue: try decoder.singleValueContainer().decode(String.self)) ?? .needsSignIn
+        }
+    }
+    /// "claude", "codex", "cursor", "agy" or "gemini".
     public let id: String
     public let name: String
-    /// What it's run as ("cursor-agent").
+    /// What it's run as, as found ("agent" or "cursor-agent" for Cursor).
     public let command: String
     public let state: State
     public let path: String?

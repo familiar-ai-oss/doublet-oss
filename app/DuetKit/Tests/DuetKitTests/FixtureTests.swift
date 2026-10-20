@@ -149,11 +149,15 @@ func eventsRoundTripWithoutLosingFields(file: String) throws {
 @Test func settingsFramesDecode() throws {
     let frames = try lines("settings.jsonl").map { try JSONDecoder().decode(ServerFrame.self, from: $0) }
     guard case .ack(let scanAck) = frames[0], let scan = scanAck.scan else { Issue.record("no scan"); return }
-    #expect(scan.agents.map(\.id) == ["claude", "codex", "cursor", "gemini"])
-    #expect(scan.agents.map(\.state) == [.ready, .needsSignIn, .notInstalled, .ready])
+    #expect(scan.agents.map(\.id) == ["claude", "codex", "cursor", "agy", "gemini"])
+    #expect(scan.agents.map(\.state) == [.ready, .needsSignIn, .notInstalled, .blocked, .ready])
     #expect(scan.agents[0].version == "2.1.303")
     #expect(scan.agents[1].signIn?.contains("codex login") == true)
-    #expect(scan.agents[3].problem != nil)
+    #expect(scan.agents[3].signIn?.contains("GEMINI_API_KEY") == true)
+    #expect(scan.agents[4].problem != nil)
+    // A state a newer hub adds reads as needing sign-in, rather than failing the whole scan.
+    let later = try JSONDecoder().decode(AgentInfo.self, from: Data(#"{"id":"x","name":"X","command":"x","state":"rate_limited"}"#.utf8))
+    #expect(later.state == .needsSignIn)
     guard case .ack(let list) = frames[1], let endpoints = list.endpoints else { Issue.record("no endpoints"); return }
     #expect(endpoints.map(\.id) == ["lm-studio", "vllm"])
     #expect(endpoints[0].hasApiKey && !endpoints[1].hasApiKey && !endpoints[1].enabled)

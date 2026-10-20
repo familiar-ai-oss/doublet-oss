@@ -207,10 +207,11 @@ export type WorkerView = {
 };
 
 // Settings → Agents (agents.ts): the coding agents on the hub's machine. `signIn`, when it needs signing in: how, and
-// what the hub looked for (the check is a best guess from files and the environment). `problem`: it's there but
-// `--version` failed (a broken install, or one that hangs), so it may not run.
-export type AgentId = 'claude' | 'codex' | 'cursor' | 'gemini';
-export type AgentState = 'ready' | 'needs_sign_in' | 'not_installed';
+// what the hub looked for (its own status command, or a guess from files and the environment). `blocked`: signed in only
+// in a way its terms don't let Doublet use (a personal Google plan for agy or Gemini CLI); `signIn` says what would work.
+// `problem`: it's there but `--version` failed (a broken install, or one that hangs), so it may not run.
+export type AgentId = 'claude' | 'codex' | 'cursor' | 'agy' | 'gemini';
+export type AgentState = 'ready' | 'needs_sign_in' | 'not_installed' | 'blocked';
 export type AgentInfo = { id: AgentId; name: string; command: string; state: AgentState; path?: string; version?: string; signIn?: string; problem?: string };
 // `host`: the hub machine's name; `platform`: Node's (darwin, linux); `scannedAt`: ms since the epoch.
 export type AgentScan = { host: string; platform: string; scannedAt: number; agents: AgentInfo[] };

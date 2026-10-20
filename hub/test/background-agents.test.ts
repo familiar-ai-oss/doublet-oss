@@ -10,6 +10,7 @@ import { test, mock } from 'node:test';
 import assert from 'node:assert/strict';
 import { Fleet, subagentTaskId } from '../src/fleet.ts';
 import { LOST_AFTER_MS, LOST_NOTE, Lead } from '../src/lead.ts';
+import { attachClaude } from './claude-session.ts';
 import type { EventBody } from '../src/protocol.ts';
 import { StateFile } from '../src/store.ts';
 
@@ -33,11 +34,11 @@ function setup() {
     },
   }, emit, new StateFile('/nonexistent'), 0);
   const sent: string[] = [];
-  lead['input'] = { push: (text: string) => sent.push(text) } as never;
-  const feed = (...ms: object[]) => { for (const m of ms) lead['handle'](m as never); };
+  const claude = attachClaude(lead, (text) => void sent.push(text));
+  const feed = (...ms: object[]) => { for (const m of ms) claude.handle(m as never); };
   const tasks = (id: string) => of(events, 'task').filter((e) => e.taskId === id);
   const cards = (id: string) => of(events, 'dialogue').filter((e) => e.taskId === id);
-  return { lead, fleet, events, sent, feed, tasks, cards };
+  return { lead, claude, fleet, events, sent, feed, tasks, cards };
 }
 
 // Claude Code's messages.
@@ -228,12 +229,12 @@ test('when Claude Code stops, its subagents stop with it; when the hub restarts,
     yield backgroundNow('a-bench');
   }
   s.lead.submit('Benchmark it in the background', 'mac');
-  await s.lead['pump'](stream() as never);
+  await s.claude['pump'](stream() as never);
   const end = s.tasks(BG).at(-1)!;
   assert.equal(end.state, 'cancelled');
   assert.match(end.result ?? '', /Claude Code restarted while it ran/);
-  assert.equal(s.lead['runs'].size, 0);
-  assert.equal(s.lead['backgroundSet'], null, "the next process's background work starts unknown");
+  assert.equal(s.claude['runs'].size, 0);
+  assert.equal(s.claude['backgroundSet'], null, "the next process's background work starts unknown");
   assert.equal(of(s.events, 'session').at(-1)?.state, 'stopped');
 
   // A hub that restarts reads its log: Claude's subagents still running there stopped with the old hub.
@@ -302,7 +303,7 @@ test('a turn Claude Code starts by itself gets its own number, and a prompt sent
   assert.deepEqual(s.sent, ['Hello', 'Thanks. Now run it on the small file']);
   s.feed(result());
   assert.deepEqual(of(s.events, 'turn_end').map((e) => e.turn), [1, 2]);
-  await s.lead['beforePrompt']({ hook_event_name: 'UserPromptSubmit', prompt: 'Thanks. Now run it on the small file' } as never, undefined, { signal: new AbortController().signal });
+  await s.claude['beforePrompt']({ hook_event_name: 'UserPromptSubmit', prompt: 'Thanks. Now run it on the small file' } as never, undefined, { signal: new AbortController().signal });
   assert.equal(of(s.events, 'user').at(-1)!.turn, 3);
 
   // A result with no turn open and no model call in it (a queued command run without the model) ends nothing.

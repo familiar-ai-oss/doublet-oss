@@ -35,6 +35,7 @@ import { FolderWatch } from './watch.ts';
 import { fullDiff } from './worker.ts';
 import { EndpointStore } from './endpoints.ts';
 import { isSettingsMsg, Settings } from './settings.ts';
+import { McpGateway } from './agents/mcp-gateway.ts';
 
 const env = process.env;
 const cfg = {
@@ -169,6 +170,11 @@ events.subscribe(events.headSeq, (e) => live.onEvent(e));
 const annotations = new Annotations(cfg.stateDir, (b) => events.append(b));
 annotations.seed(events.since(0));
 events.subscribe(events.headSeq, (e) => annotations.onEvent(e));
+// DUET_MCP_TRANSPORT=http or stdio: Claude reaches Doublet's tools through the gateway other agents use, instead of
+// in-process (to check both give it the same tools). Unset: in-process.
+const mcpTransport = process.env.DUET_MCP_TRANSPORT === 'http' || process.env.DUET_MCP_TRANSPORT === 'stdio' ? process.env.DUET_MCP_TRANSPORT : null;
+const mcpGateway = mcpTransport ? new McpGateway(log) : null;
+if (mcpGateway) log(`Doublet's tools for the lead: over ${mcpTransport}, gateway on 127.0.0.1:${await mcpGateway.listen()}`);
 const lead = new Lead(
   {
     model: cfg.model,
@@ -181,6 +187,7 @@ const lead = new Lead(
     log,
     mcpServers: () => ({ duet: dialogue.leadServer() }),
     hooks: dialogue.leadHooks(),
+    ...(mcpGateway && mcpTransport ? { mcpGateway: { gateway: mcpGateway, transport: mcpTransport } } : {}),
     onTurnStart: () => dialogue.onLeadTurnStart(),
     onIdle: () => { dialogue.onLeadIdle(); void continueWaiting(); },
     onNotesTaken: (ids, turn) => annotations.taken(ids, turn),

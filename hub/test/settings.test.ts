@@ -4,10 +4,10 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { AgentScanner, runCommand, scanAgents, versionIn, type ScanEnv } from '../src/agents.ts';
+import { AgentScanner, parseClaudeStatus, parseCodexStatus, parseCursorStatus, runCommand, scanAgents, stripAnsi, versionIn, type ScanEnv } from '../src/agents.ts';
 import { EndpointStore, endpointId, modelsIn, normalizeBaseUrl, testEndpoint } from '../src/endpoints.ts';
 import { Fleet, loadWorkers, type WorkerDef } from '../src/fleet.ts';
 import type { ControlFrame, EventBody } from '../src/protocol.ts';
@@ -132,13 +132,14 @@ test('the scan finds each agent, its version, and whether it is signed in', asyn
   assert.equal(scan.host, 'test-host');
   assert.equal(scan.platform, 'linux');
   const by = Object.fromEntries(scan.agents.map((a) => [a.id, a]));
-  assert.deepEqual(scan.agents.map((a) => a.id), ['claude', 'codex', 'cursor', 'gemini']);
+  assert.deepEqual(scan.agents.map((a) => a.id), ['claude', 'codex', 'cursor', 'agy', 'gemini']);
   assert.equal(by.claude.state, 'ready');
   assert.equal(by.claude.version, '2.1.303');
   assert.equal(by.claude.path, join(s.home, 'bin/claude'));
   assert.equal(by.codex.state, 'ready');
   assert.equal(by.codex.version, '0.47.0');
-  assert.deepEqual(by.cursor, { id: 'cursor', name: 'Cursor CLI', command: 'cursor-agent', state: 'not_installed' });
+  assert.deepEqual(by.cursor, { id: 'cursor', name: 'Cursor CLI', command: 'agent', state: 'not_installed' });
+  assert.equal(by.agy.state, 'not_installed');
   assert.equal(by.gemini.state, 'needs_sign_in');
   assert.match(by.gemini.signIn ?? '', /GEMINI_API_KEY.*oauth_creds\.json/);
   // An API key in the environment counts; DUET_CLAUDE_PATH is the hub's own `claude`, as for the lead.
@@ -153,6 +154,64 @@ test('the scan finds each agent, its version, and whether it is signed in', asyn
   assert.equal(by.codex.problem, undefined);
   assert.equal(versionIn('codex-cli 0.47.0-alpha.2\n'), '0.47.0-alpha.2');
   assert.equal(versionIn(null), undefined);
+});
+
+test('each agent\'s own status command is read, and wins over the file guess', () => {
+  assert.equal(parseClaudeStatus({ ok: true, out: '{"loggedIn": true, "authMethod": "claude.ai"}' }), true);
+  assert.equal(parseClaudeStatus({ ok: false, out: '{"loggedIn": false, "authMethod": "none"}' }), false);
+  assert.equal(parseClaudeStatus({ ok: false, out: 'error: unknown command \'auth\'' }), null);
+  assert.equal(parseCodexStatus({ ok: true, out: 'Logged in using ChatGPT' }), true);
+  assert.equal(parseCodexStatus({ ok: false, out: 'Not logged in' }), false);
+  // A broken install says nothing about the sign-in.
+  assert.equal(parseCodexStatus({ ok: false, out: 'Error: spawn vendor/codex ENOENT' }), null);
+  assert.equal(parseCursorStatus({ ok: true, out: '{"isAuthenticated": true, "email": "you@example.com"}' }), true);
+  assert.equal(parseCursorStatus({ ok: false, out: 'error: unknown option \'--format\'' }), null);
+  // Cursor 2025's plain status, colour codes and all.
+  const old = ' Starting login process...\n\x1b[2K\x1b[1A\x1b[2K\x1b[GChecking authentication status...\n\x1b[2K\x1b[G\n Not logged in\n';
+  assert.equal(stripAnsi(old).includes('\x1b'), false);
+  assert.equal(parseCursorStatus({ ok: true, out: old }), false);
+  assert.equal(parseCursorStatus({ ok: true, out: 'Logged in as you@example.com' }), true);
+});
+
+test('Cursor is found as agent or cursor-agent; agy and Gemini CLI refuse personal Google sign-ins', async () => {
+  const s = fakeHome();
+  const bin = join(s.home, 'bin');
+  const exe = (path: string, body: string) => { writeFileSync(path, `#!/bin/sh\n${body}\n`); chmodSync(path, 0o755); };
+  // Some other program called `agent` is not Cursor's.
+  exe(join(bin, 'agent'), 'echo 1.0');
+  assert.equal((await scanAgents(s)).agents.find((a) => a.id === 'cursor')?.state, 'not_installed');
+  // Cursor's `agent`, a link into its install folder, whose status says it's signed in.
+  rmSync(join(bin, 'agent'));
+  const versions = join(s.home, '.local/share/cursor-agent/versions/2026.10.1');
+  mkdirSync(versions, { recursive: true });
+  exe(join(versions, 'cursor-agent'), 'case "$1" in status) echo \'{"isAuthenticated":true}\';; *) echo 2026.10.1;; esac');
+  symlinkSync(join(versions, 'cursor-agent'), join(bin, 'agent'));
+  const cursor = (await scanAgents(s)).agents.find((a) => a.id === 'cursor');
+  assert.equal(cursor?.command, 'agent');
+  assert.equal(cursor?.state, 'ready');
+  rmSync(join(bin, 'agent'));
+
+  // Claude's own status says signed out, though ~/.claude.json names an account: the status wins.
+  exe(join(bin, 'claude'), 'case "$1" in auth) echo \'{"loggedIn":false}\'; exit 1;; *) echo "2.1.303 (Claude Code)";; esac');
+  const claude = (await scanAgents(s)).agents.find((a) => a.id === 'claude');
+  assert.equal(claude?.state, 'needs_sign_in');
+  assert.match(claude?.signIn ?? '', /Looked for: `claude auth status`/);
+
+  // agy installed with no API key: blocked, with what would work.
+  exe(join(bin, 'agy'), 'echo "agy 1.4.3"');
+  let agy = (await scanAgents(s)).agents.find((a) => a.id === 'agy');
+  assert.equal(agy?.state, 'blocked');
+  assert.match(agy?.signIn ?? '', /GEMINI_API_KEY.*modelProvider/);
+  mkdirSync(join(s.home, '.gemini/antigravity-cli'), { recursive: true });
+  writeFileSync(join(s.home, '.gemini/antigravity-cli/settings.json'), '{"modelProvider":"gemini"}');
+  agy = (await scanAgents({ ...s, env: { ...s.env, GEMINI_API_KEY: 'k' } })).agents.find((a) => a.id === 'agy');
+  assert.equal(agy?.state, 'ready');
+
+  // Gemini CLI with only a personal Google sign-in: blocked; with Vertex chosen in its settings: ready.
+  writeFileSync(join(s.home, '.gemini/oauth_creds.json'), '{}');
+  assert.equal((await scanAgents(s)).agents.find((a) => a.id === 'gemini')?.state, 'blocked');
+  writeFileSync(join(s.home, '.gemini/settings.json'), '{"security":{"auth":{"selectedType":"vertex-ai"}}}');
+  assert.equal((await scanAgents(s)).agents.find((a) => a.id === 'gemini')?.state, 'ready');
 });
 
 test('the scanner keeps its last scan until a rescan', async () => {
@@ -207,7 +266,7 @@ test('Settings adds, changes, tests and removes endpoints, and never sends a key
   assert.deepEqual(frames.at(-1), { type: 'endpoints', endpoints: [] });
 
   const listed = await settings.handle({ type: 'agents_list' });
-  assert.equal(listed.scan?.agents.length, 4);
+  assert.equal(listed.scan?.agents.length, 5);
   assert.notEqual((await settings.handle({ type: 'agents_scan' })).scan, listed.scan);
 });
 
