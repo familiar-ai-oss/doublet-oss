@@ -107,9 +107,9 @@ struct NoteStatus: View {
 
     var body: some View {
         let (text, symbol, tint): (String, String, Color) = switch annotation.status {
-        case "answered": (annotation.diagrams?.isEmpty == false ? "Answered · diagram" : "Answered", "checkmark.bubble.fill", .green)
+        case "answered": (annotation.diagrams?.isEmpty == false ? "Answered · diagram" : "Answered", "checkmark.bubble.fill", .stateDone)
         case "resolved": ("Resolved", "checkmark.circle", .secondary)
-        default: (annotation.turn != nil && model.store.leadStatus.busy ? "Claude is on it" : "Waiting", "ellipsis.bubble", .orange)
+        default: (annotation.turn != nil && model.store.leadStatus.busy ? "Claude is on it" : "Waiting", "ellipsis.bubble", .stateWorking)
         }
         Label(text, systemImage: symbol).foregroundStyle(tint).labelStyle(.titleAndIcon)
     }
@@ -297,7 +297,7 @@ struct AnnotationDetail: View {
             } else if a.answering == nil, let why = a.escalated, !why.isEmpty {
                 // Claude couldn't answer: why, and another try.
                 VStack(alignment: .leading, spacing: 8) {
-                    Label(why, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.orange)
+                    Label(why, systemImage: "exclamationmark.triangle").font(.callout).foregroundStyle(.stateFailed)
                     Button("Ask Claude Again", systemImage: "sparkles") { model.send(.annotationUpdate(id: a.id, reroute: "claude")) }
                         .buttonStyle(.bordered).controlSize(.small)
                 }
@@ -358,7 +358,7 @@ struct AnnotationDetail: View {
                                 Text(SideChatView.activity(chat.activity)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                             }
                         }
-                        if let e = chat.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red) }
+                        if let e = chat.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed) }
                     }
                 }
                 .accessibilityIdentifier("note-replies")
@@ -381,7 +381,7 @@ struct AnnotationDetail: View {
                     .help("Start a message in the conversation with this question and its answer, for you to add to")
                     .accessibilityIdentifier("post-to-chat")
             }
-            if let replyProblem { Label(replyProblem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red) }
+            if let replyProblem { Label(replyProblem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed) }
             HStack(alignment: .bottom, spacing: 8) {
                 TextField(waiting ? "Reply once it's answered" : "Reply…", text: $reply, axis: .vertical)
                     .lineLimit(1...6)
@@ -393,7 +393,7 @@ struct AnnotationDetail: View {
                     .accessibilityIdentifier("note-reply-field")
                 if answering, let chatId = a.chatId {
                     Button("Stop", systemImage: "stop.circle.fill") { model.send(.sideStop(chatId: chatId)) }
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.stateFailed)
                         .keyboardShortcut(".", modifiers: .command)
                 } else {
                     Button("Reply", systemImage: "arrow.up.circle.fill") { send(a) }

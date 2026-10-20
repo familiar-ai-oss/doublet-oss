@@ -83,7 +83,7 @@ struct Composer: View {
                 if store.leadStatus.busy && density != .compact {
                     // ⌘. lives in the Claude menu (Mac, and iPad with a keyboard).
                     Button("Stop", systemImage: "stop.circle.fill") { model.send(.interrupt) }
-                        .labelStyle(.iconOnly).font(.title2).foregroundStyle(.red)
+                        .labelStyle(.iconOnly).font(.title2).foregroundStyle(.stateFailed)
                 }
                 // Nothing to send: Talk mode instead, as in a phone's messages.
                 if empty, !model.voice.isDictating("composer"), target.kind == .claude {

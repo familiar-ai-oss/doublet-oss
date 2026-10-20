@@ -199,12 +199,12 @@ struct TabChip: View {
                 .foregroundStyle(selected ? .primary : .secondary)
             if workspace.split != nil, let pane { PaneMarker(pane: pane) }
             if model.isBusy(tab.place) {
-                Circle().fill(Color.accentColor).frame(width: 6, height: 6)
+                Circle().fill(Color.stateWorking).frame(width: 6, height: 6)
             }
             if tab.place == .inbox, !model.store.attention.isEmpty {
-                Text("\(model.store.attention.count)").font(.caption2.bold().monospacedDigit()).foregroundStyle(.white)
+                Text("\(model.store.attention.count)").font(.caption2.bold().monospacedDigit()).foregroundStyle(.onNeedsYou)
                     .padding(.horizontal, 5).padding(.vertical, 1)
-                    .background { Capsule().fill(.orange) }
+                    .background { Capsule().fill(.stateNeedsYou) }
             }
             #if os(iOS)
             if selected {

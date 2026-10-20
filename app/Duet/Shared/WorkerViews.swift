@@ -110,7 +110,7 @@ struct SubagentInfo: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Circle().fill(worker.active?.isEmpty == false ? Color.accentColor : .green).frame(width: 10, height: 10)
+                Circle().fill(worker.active?.isEmpty == false ? Color.stateWorking : .stateDone).frame(width: 10, height: 10)
                 Text(model.workerStatus(worker)).font(.headline)
             }
             LabeledContent("Model") { Text("Claude, on your Max plan").foregroundStyle(.secondary) }
@@ -160,7 +160,7 @@ struct WorkerControls: View {
             }
             if !worker.loaded, worker.enabled {
                 Label("Not loaded: the next task asks before loading it onto the GPU.", systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.stateFailed)
             }
             VStack(alignment: .leading, spacing: 4) {
                 Picker("Effort", selection: Binding(get: { worker.effort }, set: { model.send(.setWorker(worker: worker.id, effort: $0)) })) {
@@ -168,7 +168,7 @@ struct WorkerControls: View {
                 }
                 .pickerStyle(.segmented)
                 .accessibilityIdentifier("effort-\(worker.id)")
-                if worker.verifiedEffort == false { Text("This model's effort mapping hasn't been measured yet.").font(.caption2).foregroundStyle(.orange) }
+                if worker.verifiedEffort == false { Text("This model's effort mapping hasn't been measured yet.").font(.caption2).foregroundStyle(.stateFailed) }
             }
             }
             HStack {
@@ -285,11 +285,11 @@ struct TaskThreadView: View {
 
     private var tint: Color {
         switch task.displayState {
-        case "done": .green
-        case "stopped", "out_of_room": .orange
-        case "failed": .red
-        case "awaiting_swap": .orange
-        case "running": .accentColor
+        case "done": .stateDone
+        case "stopped", "out_of_room": .stateIdle
+        case "failed": .stateFailed
+        case "awaiting_swap": .stateNeedsYou
+        case "running": .stateWorking
         default: .secondary
         }
     }
@@ -331,18 +331,18 @@ struct DialogueLine: View {
                 Text("\(card.from) → \(card.to)").font(.caption2).foregroundStyle(.secondary)
                 if card.kind != "TASK" && card.kind != "RESULT" { Text(card.text).font(.caption).lineLimit(4) }
             }
-            if let r = card.refused { Text(r).font(.caption2).foregroundStyle(.red) }
+            if let r = card.refused { Text(r).font(.caption2).foregroundStyle(.stateFailed) }
         }
     }
 
     private var color: Color {
         switch card.kind {
-        case "QUESTION", "ESCALATE": .orange
-        case "ANSWER": .green
-        case "STEER": .purple
-        case "CANCEL": .red
-        case "RESULT": .teal
-        default: .blue
+        case "QUESTION", "ESCALATE": .stateNeedsYou
+        case "ANSWER": .stateDone
+        case "STEER": .stateWorking
+        case "CANCEL": .stateFailed
+        case "RESULT": .stateDone
+        default: .textSecondary
         }
     }
 }
@@ -364,7 +364,7 @@ struct ResultCard: View {
                 Text((try? AttributedString(markdown: r, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(r))
                     .font(.callout).textSelection(.enabled)
             }
-            if let e = task.error, task.state == "failed" { Text(e).font(.caption).foregroundStyle(.red) }
+            if let e = task.error, task.state == "failed" { Text(e).font(.caption).foregroundStyle(.stateFailed) }
             switch task.isApple || task.isClaude ? nil : task.evidence {  // Nothing measured: an Apple worker changes no files; a subagent shares Claude's folder.
             case nil: EmptyView()
             case "not a git repository": Label("Not a git repo, so no diff to show", systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
@@ -396,7 +396,7 @@ struct AppleWorkerInfo: View {
             }
             if !worker.available {
                 Label("Unavailable: \(worker.unavailableReason ?? "not connected").", systemImage: "exclamationmark.triangle")
-                    .font(.caption).foregroundStyle(.orange)
+                    .font(.caption).foregroundStyle(.stateFailed)
             }
             Text(about).font(.caption).foregroundStyle(.secondary)
         }

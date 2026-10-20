@@ -101,7 +101,7 @@ struct LeadModeMenu: View {
         } label: {
             Label(current.title, systemImage: current.symbol)
         }
-        .tint(current.risky ? .red : nil)
+        .tint(current.risky ? .stateFailed : nil)
         .help("How Claude asks before it acts: \(current.detail)")
         .confirmationDialog("Bypass permissions?", isPresented: $confirmingBypass, titleVisibility: .visible) {
             Button("Bypass Permissions", role: .destructive) { model.setPermissionMode("bypassPermissions") }
@@ -121,7 +121,7 @@ struct PermissionModeLine: View {
         if let banner = current.banner {
             HStack(spacing: 8) {
                 Label(banner, systemImage: current.symbol)
-                    .foregroundStyle(current.risky ? Color.red : .secondary)
+                    .foregroundStyle(current.risky ? Color.stateFailed : .secondary)
                     .lineLimit(2)
                 Spacer(minLength: 8)
                 Button("Back to Ask") { model.setPermissionMode("default") }

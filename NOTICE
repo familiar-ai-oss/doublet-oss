@@ -6,3 +6,6 @@ This product is licensed under the Apache License, Version 2.0 (see LICENSE).
 It bundles third-party software in app/Duet/Resources/Diagram, each under its own license:
   - Mermaid (https://github.com/mermaid-js/mermaid), MIT License: mermaid-LICENSE.txt
   - highlight.js (https://github.com/highlightjs/highlight.js), BSD 3-Clause License: highlight.js-LICENSE.txt
+
+It bundles a font in app/Duet/Resources/Fonts:
+  - Exo 2 (https://github.com/googlefonts/Exo-2.0), SIL Open Font License 1.1: Exo2-OFL.txt

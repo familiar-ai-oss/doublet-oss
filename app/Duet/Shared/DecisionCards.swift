@@ -54,7 +54,7 @@ struct ApprovalCard: View {
                 Label(plan != nil ? "Claude's plan is ready" : request.title ?? "Claude wants to run \(request.displayName ?? request.tool)",
                       systemImage: plan != nil ? "list.bullet.clipboard" : "hand.raised.fill")
                     .font(density == .compact ? .headline : .subheadline.bold())
-                    .foregroundStyle(.orange)
+                    .foregroundStyle(.stateNeedsYou)
                 Spacer()
                 if request.title != nil { Text(request.tool).font(.caption.monospaced()).foregroundStyle(.secondary) }
             }
@@ -80,7 +80,7 @@ struct ApprovalCard: View {
             }
             if request.needsCare {
                 Label("Check this one closely before approving.", systemImage: "exclamationmark.triangle.fill")
-                    .font(.caption.bold()).foregroundStyle(.red)
+                    .font(.caption.bold()).foregroundStyle(.stateFailed)
             }
             if let d = request.description, density != .compact, mode != .editing { Text(d).font(.caption).foregroundStyle(.secondary) }
             // The note to Claude: always there on iPad and Mac; on iPhone once you ask for it.
@@ -94,7 +94,7 @@ struct ApprovalCard: View {
             }
             buttons
         }
-        .card(tint: request.needsCare ? .red : .orange)
+        .card(tint: request.needsCare ? .stateFailed : .stateNeedsYou)
         .confirmationDialog("Approve this?", isPresented: $confirmingApprove, titleVisibility: .visible) {
             Button("Approve") { model.send(.approve(id: approvalId)) }
         } message: {
@@ -132,7 +132,7 @@ struct ApprovalCard: View {
             .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.6)) }
             .accessibilityIdentifier("edit-field-\(approvalId)")
             Text(draftError ?? (plan != nil ? "Claude works from the plan as you've edited it." : "Claude runs exactly this instead, and is told you edited it."))
-                .font(.caption).foregroundStyle(draftError == nil ? Color.secondary : Color.red)
+                .font(.caption).foregroundStyle(draftError == nil ? Color.secondary : Color.stateFailed)
         }
     }
 
@@ -144,7 +144,7 @@ struct ApprovalCard: View {
                 Button { allowEdited() } label: {
                     Label(plan != nil ? "Approve Edited Plan" : "Allow Edited", systemImage: "checkmark").frame(maxWidth: compact ? .infinity : nil)
                 }
-                .buttonStyle(.borderedProminent).tint(.green)
+                .needsYouProminent()
                 .accessibilityIdentifier("edit-save-\(approvalId)")
                 cancelButton
             }
@@ -155,7 +155,7 @@ struct ApprovalCard: View {
                 Button(role: .destructive) { reject() } label: {
                     Label("Reject", systemImage: "xmark").frame(maxWidth: compact ? .infinity : nil)
                 }
-                .buttonStyle(.borderedProminent).tint(.red)
+                .failedProminent()
                 .accessibilityIdentifier("reject-with-note-\(approvalId)")
                 cancelButton
             }
@@ -164,7 +164,7 @@ struct ApprovalCard: View {
         case .deciding where compact && request.needsCare:
             // Risky: Reject is the big one; Approve asks again.
             VStack(spacing: 8) {
-                rejectButton(wide: true).buttonStyle(.borderedProminent).tint(.red)
+                rejectButton(wide: true).failedProminent()
                 HStack(spacing: 8) {
                     editButton(wide: true)
                     approveButton(wide: true)
@@ -206,11 +206,11 @@ struct ApprovalCard: View {
         let label = Label(plan != nil ? "Approve Plan" : "Approve", systemImage: "checkmark").frame(maxWidth: wide ? .infinity : nil)
         if request.needsCare {
             Button { confirmingApprove = true } label: { label }
-                .buttonStyle(.bordered).tint(.green)
+                .buttonStyle(.bordered).tint(.stateNeedsYou)
                 .accessibilityIdentifier("approve-\(approvalId)")
         } else {
             Button { model.send(.approve(id: approvalId)) } label: { label }
-                .buttonStyle(.borderedProminent).tint(.green)
+                .needsYouProminent()
                 .accessibilityIdentifier("approve-\(approvalId)")
         }
     }
@@ -331,7 +331,7 @@ struct AskedQuestionsCard: View {
         VStack(alignment: .leading, spacing: 14) {
             Label(questions.count == 1 ? "Claude has a question" : "Claude has \(questions.count) questions", systemImage: "questionmark.bubble.fill")
                 .font(density == .compact ? .headline : .subheadline.bold())
-                .foregroundStyle(.orange)
+                .foregroundStyle(.stateNeedsYou)
             ForEach(questions) { q in
                 VStack(alignment: .leading, spacing: 8) {
                     if let header = q.header { Text(header.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary) }
@@ -361,7 +361,7 @@ struct AskedQuestionsCard: View {
             }
             HStack(spacing: 8) {
                 Button { sendAnswers() } label: { Label("Send Answers", systemImage: "paperplane.fill") }
-                    .buttonStyle(.borderedProminent).tint(.green)
+                    .needsYouProminent()
                     .disabled(!questions.allSatisfy { answer($0) != nil })
                     .accessibilityIdentifier("answer-\(approvalId)")
                 Button { model.send(.reject(id: approvalId, message: "Decide for yourself, and say what you chose.")) } label: {
@@ -371,7 +371,7 @@ struct AskedQuestionsCard: View {
             }
             .labelStyle(.titleAndIcon).lineLimit(1)
         }
-        .card(tint: .orange)
+        .card(tint: .stateNeedsYou)
     }
 
     /// The answer to one question: your own words, else what you picked.
@@ -434,7 +434,7 @@ struct ResolvedApprovalRow: View {
     }
 
     private var tint: Color {
-        resolution.decision != "allow" ? .red : resolution.edited ? .blue : .green
+        resolution.decision != "allow" ? .stateFailed : resolution.edited ? .stateWorking : .stateDone
     }
 
     private var verdict: String {
@@ -457,7 +457,7 @@ struct QuestionCard: View {
         let open = model.store.attention.contains { $0.id == "q-\(question.id)" }
         VStack(alignment: .leading, spacing: 10) {
             Label("\(question.from) asks", systemImage: "questionmark.bubble.fill")
-                .font(density == .compact ? .headline : .subheadline.bold()).foregroundStyle(.orange)
+                .font(density == .compact ? .headline : .subheadline.bold()).foregroundStyle(.stateNeedsYou)
             Text(question.text).font(.callout).textSelection(.enabled)
             if open {
                 if let opts = question.options, !opts.isEmpty {
@@ -473,7 +473,7 @@ struct QuestionCard: View {
                 Text("Answered").font(.caption).foregroundStyle(.secondary)
             }
         }
-        .card(tint: .orange)
+        .card(tint: .stateNeedsYou)
     }
 
     private func send() {
@@ -503,7 +503,7 @@ struct SwapCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Label("\(swap.worker) needs \(swap.model)", systemImage: "memorychip").font(.headline).foregroundStyle(.orange)
+            Label("\(swap.worker) needs \(swap.model)", systemImage: "memorychip").font(.headline).foregroundStyle(.stateNeedsYou)
             Text(swap.evicts.isEmpty ? "Loads on \(swap.device); nothing is evicted." : "Loads on \(swap.device) and evicts \(swap.evicts.joined(separator: ", ")).")
                 .font(.callout)
             HStack {
@@ -511,7 +511,7 @@ struct SwapCard: View {
                 Button("Cancel Task", role: .destructive) { model.send(.rejectSwap(id: swap.id)) }.buttonStyle(.bordered)
             }
         }
-        .card(tint: .orange)
+        .card(tint: .stateNeedsYou)
     }
 }
 
@@ -530,7 +530,7 @@ struct AttentionList: View {
                 AttentionCard(item: item)
                     .swipeActions(edge: .leading, allowsFullSwipe: false) {
                         if case .approval(let a) = item, !a.needsCare {
-                            Button { model.send(.approve(id: a.id)) } label: { Label("Approve", systemImage: "checkmark") }.tint(.green)
+                            Button { model.send(.approve(id: a.id)) } label: { Label("Approve", systemImage: "checkmark") }.tint(.stateDone)
                         }
                     }
                     .swipeActions(edge: .trailing, allowsFullSwipe: true) {

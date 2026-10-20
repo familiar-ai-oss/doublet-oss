@@ -102,11 +102,11 @@ private struct NowCard: View {
     var body: some View {
         let store = model.store
         let items = store.attention
-        RailCard(title: "Now", symbol: "clock", tint: .accentColor) {
+        RailCard(title: "Now", symbol: "clock", tint: .stateWorking) {
             if !items.isEmpty {
                 Button { model.show(.inbox) } label: {
                     HStack(spacing: 8) {
-                        Image(systemName: "hand.raised.fill").foregroundStyle(.orange).frame(width: 18)
+                        Image(systemName: "hand.raised.fill").foregroundStyle(.stateNeedsYou).frame(width: 18)
                         Text("Needs you").font(.callout.weight(.medium))
                         Spacer(minLength: 4)
                         Text("\(items.count)").font(.callout.monospacedDigit()).foregroundStyle(.secondary)
@@ -172,14 +172,14 @@ private struct WorkCard: View {
         let live = id == store.currentConversationId
         let limit = showsAll ? Int.max : 6
         RailCard(title: "The work", symbol: "hammer", summary: summary.map { "\($0.done) of \($0.total) done" } ?? count(tasks),
-                 tint: .accentColor, open: items.isEmpty ? nil : { model.show(.plan(id)) }) {
+                 tint: .stateWorking, open: items.isEmpty ? nil : { model.show(.plan(id)) }) {
             if items.isEmpty, tasks.isEmpty, diagrams.isEmpty {
                 Text(live ? "As Claude works, its plan, its workers' tasks and their changes show here." : "No plan or tasks in this conversation.")
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let summary {
                 ProgressView(value: Double(summary.done), total: Double(max(summary.total, 1)))
-                    .tint(summary.done == summary.total ? .green : .accentColor)
+                    .tint(summary.done == summary.total ? .stateDone : .stateWorking)
             }
             ForEach(items.prefix(limit)) { WorkStepRow(item: $0, conversationId: id) }
             if !tasks.isEmpty {
@@ -229,7 +229,7 @@ private struct WorkStepRow: View {
                     .foregroundStyle(item.phase == .done || item.phase == .cancelled ? .secondary : .primary)
                     .lineLimit(2)
                 Text("\(owner) · \(PlanStepRow.label(item.phase, claudes: item.step.isClaudes))")
-                    .font(.caption2).foregroundStyle(item.step.isClaudes ? Color.accentColor : .secondary).lineLimit(1)
+                    .font(.caption2).foregroundStyle(item.step.isClaudes ? Color.stateWorking : .secondary).lineLimit(1)
                 if let detail = item.detail, !detail.isEmpty {
                     Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
                 }
@@ -392,13 +392,13 @@ struct ThreadRow: View {
             ProgressView().controlSize(.mini)
         case .note(let a, _):
             Image(systemName: a.ink == true ? "pencil.and.scribble" : "questionmark.bubble")
-                .foregroundStyle(a.resolved ? Color.secondary : a.answered ? .green : .orange)
+                .foregroundStyle(a.resolved ? Color.secondary : a.answered ? .stateDone : .stateWorking)
         case .chat(let c):
             if c.isAnswering {
                 ProgressView().controlSize(.mini)
             } else {
                 Image(systemName: c.state == "failed" ? "exclamationmark.bubble" : "bubble.left.and.bubble.right")
-                    .foregroundStyle(c.state == "failed" ? Color.orange : .secondary)
+                    .foregroundStyle(c.state == "failed" ? Color.stateFailed : .secondary)
             }
         }
     }
@@ -435,8 +435,8 @@ private struct DiffStatLabel: View {
 
     var body: some View {
         HStack(spacing: 4) {
-            Text("+\(stat.added)").foregroundStyle(.green)
-            Text("−\(stat.removed)").foregroundStyle(.red)
+            Text("+\(stat.added)").foregroundStyle(.codeAddition)
+            Text("−\(stat.removed)").foregroundStyle(.codeDeletion)
         }
         .font(.caption.monospacedDigit())
         .accessibilityElement(children: .ignore)

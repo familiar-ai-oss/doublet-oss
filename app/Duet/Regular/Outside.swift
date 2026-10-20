@@ -54,7 +54,7 @@ struct OutsideSessionView: View {
             if let session {
                 Label(model.whereLine(session), systemImage: AppModel.symbol(of: session))
                     .font(.callout.weight(.medium))
-                    .foregroundStyle(session.status == "busy" ? Color.accentColor : .primary)
+                    .foregroundStyle(session.status == "busy" ? Color.stateWorking : .primary)
                 Text(session.live
                      ? "Doublet follows it as it runs, and can't type into it. Continue in Doublet to talk to it here: you get a copy with everything said, and it keeps running there."
                      : "It has ended there. Continue in Doublet to pick it up here, as it was.")
@@ -62,10 +62,10 @@ struct OutsideSessionView: View {
             } else {
                 Text("This session isn't running elsewhere any more.").font(.caption).foregroundStyle(.secondary)
             }
-            if let problem { Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red) }
+            if let problem { Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed) }
             if model.store.leadStatus.busy {
                 Label(queued ? "It continues here as soon as Claude's current turn ends." : "Claude is in the middle of a turn here: continuing takes over once that turn ends.", systemImage: "hourglass")
-                    .font(.caption).foregroundStyle(queued ? AnyShapeStyle(.secondary) : AnyShapeStyle(.orange))
+                    .font(.caption).foregroundStyle(queued ? AnyShapeStyle(.secondary) : AnyShapeStyle(.stateNeedsYou))
             }
             HStack {
                 if let cwd = session?.cwd { Label(Paths.short(cwd), systemImage: "folder").font(.caption).foregroundStyle(.secondary).lineLimit(1) }
@@ -137,7 +137,7 @@ struct OutsideRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: AppModel.symbol(of: session))
-                .foregroundStyle(session.status == "busy" ? Color.accentColor : .secondary)
+                .foregroundStyle(session.status == "busy" ? Color.stateWorking : .secondary)
                 .frame(width: 18)
             VStack(alignment: .leading, spacing: 2) {
                 Text(session.name).lineLimit(1).truncationMode(.tail)
@@ -145,7 +145,7 @@ struct OutsideRow: View {
                     .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
             }
             Spacer(minLength: 0)
-            if session.status == "busy" { Circle().fill(Color.accentColor).frame(width: 6, height: 6) }
+            if session.status == "busy" { Circle().fill(Color.stateWorking).frame(width: 6, height: 6) }
         }
         .contentShape(Rectangle())
         .accessibilityElement(children: .combine)

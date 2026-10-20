@@ -117,7 +117,7 @@ struct LeadThread: View {
                         Label(waiting ? "Approval waiting" : "Latest", systemImage: waiting ? "hand.raised.fill" : "arrow.down")
                             .font(.callout.bold())
                     }
-                    .buttonStyle(.borderedProminent).tint(waiting ? .orange : .accentColor)
+                    .buttonStyle(.borderedProminent).tint(waiting ? .stateNeedsYou : .slateHigh).foregroundStyle(waiting ? Color.onNeedsYou : .textPrimary)
                     .clipShape(.capsule).padding()
                     .transition(.scale.combined(with: .opacity))
                 }
@@ -323,7 +323,7 @@ struct LeadRowView: View {
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
             case .toolResult(_, let preview, let isError):
                 Text(preview).font(.caption2.monospaced()).lineLimit(density == .dense ? 6 : 3)
-                    .foregroundStyle(isError ? AnyShapeStyle(.red) : AnyShapeStyle(.tertiary))
+                    .foregroundStyle(isError ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.tertiary))
                     .padding(.leading, 22)
             case .agent(_, let message):
                 AgentLine(message: message)
@@ -489,7 +489,7 @@ struct AgentLine: View {
                 if let options = message.options, message.kind == "QUESTION", !options.isEmpty {
                     Text(options.joined(separator: " · ")).font(.caption).foregroundStyle(.secondary)
                 }
-                if let refused = message.refused { Text(refused).font(.caption).foregroundStyle(.red) }
+                if let refused = message.refused { Text(refused).font(.caption).foregroundStyle(.stateFailed) }
             }
             Spacer(minLength: 0)
             Image(systemName: "chevron.right").font(.caption.bold()).foregroundStyle(.tertiary)
@@ -553,10 +553,10 @@ struct AgentLine: View {
 
     private func tint(_ result: ResultParts?) -> Color {
         switch message.kind {
-        case "QUESTION", "ESCALATE": .orange
-        case "RESULT": result?.ok == false ? .red : .green
+        case "QUESTION", "ESCALATE": .stateNeedsYou
+        case "RESULT": result?.ok == false ? .stateFailed : .stateDone
         case "STATUS", "CANCEL": .secondary
-        default: .accentColor
+        default: .stateWorking
         }
     }
 }

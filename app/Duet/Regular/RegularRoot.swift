@@ -122,7 +122,7 @@ struct Sidebar: View {
                         Text("Needs you")
                     } icon: {
                         Image(systemName: store.attention.isEmpty ? "tray" : "hand.raised.fill")
-                            .foregroundStyle(store.attention.isEmpty ? Color.secondary : Color.orange)
+                            .foregroundStyle(store.attention.isEmpty ? Color.secondary : Color.stateNeedsYou)
                     }
                     .keepsOnDoubleClick(.inbox)
                     .badge(store.attention.count)
@@ -222,7 +222,7 @@ struct Sidebar: View {
                         }
                     } icon: {
                         Image(systemName: "cpu")
-                            .foregroundStyle(store.workers.contains { $0.running != nil } ? Color.accentColor : Color.secondary)
+                            .foregroundStyle(store.workers.contains { $0.running != nil } ? Color.stateWorking : Color.secondary)
                     }
                     .keepsOnDoubleClick(.fleet)
                 }
@@ -594,7 +594,7 @@ private struct ConversationCapsule: View {
                     Text("Conversation").font(.caption2).foregroundStyle(.secondary)
                     Text(model.title(of: centre)).font(.callout.weight(.medium)).lineLimit(1)
                 }
-                if model.isBusy(centre) { Circle().fill(Color.accentColor).frame(width: 7, height: 7) }
+                if model.isBusy(centre) { Circle().fill(Color.stateWorking).frame(width: 7, height: 7) }
                 Image(systemName: "arrow.down.right.and.arrow.up.left").font(.caption.bold()).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 14).padding(.vertical, 8)

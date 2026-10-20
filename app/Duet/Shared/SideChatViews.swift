@@ -201,14 +201,14 @@ struct SideChatView: View {
                                 Text(Self.activity(chat.activity)).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
                             }
                         }
-                        if let e = chat.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red) }
+                        if let e = chat.error { Label(e, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed) }
                     } else {
                         Text(currentChoice == "auto"
                              ? "Ask a quick question. A question about the code goes to a local model first, and its answer counts only when the lines it cites check out. Otherwise Claude answers, in a copy of this conversation. Nothing here changes the conversation or your files."
                              : "Ask a quick question. Claude answers in a copy of this conversation, so it knows what's been said and done, and the conversation itself stays as it is. It can read files but not change anything.")
                             .font(.callout).foregroundStyle(.secondary)
                     }
-                    if let problem { Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red) }
+                    if let problem { Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed) }
                     Color.clear.frame(height: 1).id("end")
                 }
                 .padding(12)
@@ -240,7 +240,7 @@ struct SideChatView: View {
                 .background { RoundedRectangle(cornerRadius: 12, style: .continuous).fill(.secondary.opacity(0.1)) }
                 if chat?.isAnswering == true {
                     Button("Stop", systemImage: "stop.circle.fill") { if let id = chatId { model.send(.sideStop(chatId: id)) } }
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.stateFailed)
                         .keyboardShortcut(".", modifiers: .command)
                 } else if empty, !model.voice.isDictating(field) {
                     // Nothing typed: ask out loud instead, and hear the answer.
@@ -456,7 +456,7 @@ struct SideChatRow: View {
                     ProgressView().controlSize(.mini)
                 } else {
                     Image(systemName: chat.state == "failed" ? "exclamationmark.bubble" : "bubble.left.and.bubble.right")
-                        .foregroundStyle(chat.state == "failed" ? Color.orange : .secondary)
+                        .foregroundStyle(chat.state == "failed" ? Color.stateFailed : .secondary)
                 }
             }
             .font(.callout)

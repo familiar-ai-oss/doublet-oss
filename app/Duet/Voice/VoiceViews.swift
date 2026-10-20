@@ -19,7 +19,7 @@ struct MicButton: View {
             }
         }
         .labelStyle(.iconOnly)
-        .foregroundStyle(on ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+        .foregroundStyle(on ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.secondary))
         .symbolEffect(.pulse, options: .repeating, isActive: on)
         .contentTransition(.symbolEffect(.replace))
         .help(on ? "Stop dictating" : "Dictate: Apple's on-device speech recognition types what you say")
@@ -119,7 +119,7 @@ struct TalkPanel: View {
                 Button("Talk Now", systemImage: "mic.circle") { v.talkNow() }
                 if v.target == .conversation, model.store.leadStatus.busy {
                     Button("Stop Claude", systemImage: "stop.circle.fill") { model.send(.interrupt) }
-                        .foregroundStyle(.red)
+                        .foregroundStyle(.stateFailed)
                 }
             case .speaking:
                 Button("Skip", systemImage: "forward.end.circle") { v.skipSpeech() }
@@ -245,7 +245,7 @@ struct TalkOrb: View {
 
     private var tint: Color {
         switch phase {
-        case .listening: .accentColor
+        case .listening: .stateWorking
         case .speaking: .purple
         case .working, .starting: .gray
         case .paused: .secondary
@@ -268,7 +268,7 @@ struct ProblemLine: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Label(text, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.orange)
+            Label(text, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed)
             Spacer(minLength: 0)
             Button("Dismiss", systemImage: "xmark", action: dismiss).labelStyle(.iconOnly).font(.caption).buttonStyle(.borderless)
         }

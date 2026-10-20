@@ -210,10 +210,10 @@ struct StickyNote: View {
         .frame(width: density == .dense ? 300 : 340, alignment: .leading)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(Color.yellow.opacity(0.14))
+                .fill(.slateRaised)
                 .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         }
-        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(Color.yellow.opacity(0.5)) }
+        .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(.pencilTether) }
         .shadow(color: .black.opacity(0.16), radius: 14, y: 6)
         .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(StickyLayer.space)) } action: { if drag == .zero { rest = $0 } }
         .offset(drag)
@@ -287,11 +287,11 @@ struct StickyNote: View {
         } else if let status = c.status {
             HStack(spacing: 6) {
                 if c.failed {
-                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange)
+                    Image(systemName: "exclamationmark.triangle").foregroundStyle(.stateFailed)
                 } else {
                     ProgressView().controlSize(.small)
                 }
-                Text(status).font(.callout).foregroundStyle(c.failed ? .orange : .secondary).lineLimit(2)
+                Text(status).font(.callout).foregroundStyle(c.failed ? .stateFailed : .secondary).lineLimit(2)
             }
         }
     }

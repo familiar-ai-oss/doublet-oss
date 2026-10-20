@@ -62,9 +62,9 @@ struct NoteDisplay {
 
     var tint: Color {
         switch note.intent {
-        case .change, .remove: .red
-        case .question: .blue
-        case .approve: .green
+        case .change, .remove: .penRed
+        case .question: .penChalk
+        case .approve: .penGreen
         case .connect: .purple
         case .group: .orange
         case .emphasize: .yellow
@@ -222,7 +222,7 @@ private struct DiagramStill: View {
                     .frame(maxWidth: image.size.width, maxHeight: image.size.height)
                     .padding(10)
             case .failed(let why)?:
-                Text(why).font(.caption.monospaced()).foregroundStyle(.red).lineLimit(8)
+                Text(why).font(.caption.monospaced()).foregroundStyle(.stateFailed).lineLimit(8)
                     .padding(16)
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
             case nil:
@@ -346,7 +346,7 @@ struct DiagramScreen: View {
     @ViewBuilder private func bottomBar(_ d: DiagramEvent) -> some View {
         VStack(spacing: 0) {
             if let problem {
-                Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.red).lineLimit(3)
+                Label(problem, systemImage: "exclamationmark.triangle").font(.caption).foregroundStyle(.stateFailed).lineLimit(3)
                     .frame(maxWidth: .infinity, alignment: .leading).padding(10)
             }
             if let selected {

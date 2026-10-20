@@ -27,7 +27,7 @@ struct LeadStatusCard: View {
                     Button(role: .destructive) { model.send(.interrupt) } label: {
                         Label("Stop", systemImage: "stop.fill").font(.callout.bold())
                     }
-                    .buttonStyle(.borderedProminent).tint(.red)
+                    .failedProminent()
                     .accessibilityIdentifier("stop")
                 }
             }
@@ -35,7 +35,7 @@ struct LeadStatusCard: View {
                 Text(preview).font(.callout).foregroundStyle(.secondary).lineLimit(3)
             }
         }
-        .card(tint: status.phase.tint)
+        .card(tint: status.phase == .idle ? nil : status.phase.tint)
         .accessibilityElement(children: .combine)
     }
 }
@@ -61,7 +61,7 @@ struct WorkerChip: View {
             .font(.caption2).foregroundStyle(.tertiary)
         }
         .frame(width: 168, alignment: .leading)
-        .card(tint: worker.running != nil ? .accentColor : .secondary)
+        .card(tint: worker.running != nil ? .stateWorking : nil)
     }
 }
 
@@ -91,7 +91,7 @@ struct ConnectionFooter: View {
                 Label(d.paused ? "Paused" : "Pause", systemImage: d.paused ? "pause.circle.fill" : "pause.circle").fixedSize()
             }
             .toggleStyle(.button).controlSize(.small)
-            .tint(d.paused ? .orange : .accentColor)
+            .tint(d.paused ? .stateNeedsYou : .stateWorking)
             .help("Pause handoffs: stops delegation and agent-started turns")
             .accessibilityLabel(d.paused ? "Handoffs paused" : "Pause handoffs")
             .accessibilityIdentifier("pause")
@@ -104,9 +104,9 @@ struct ConnectionFooter: View {
 
     private func color(_ c: ConnectionState) -> Color {
         switch c {
-        case .connected: .green
-        case .connecting, .waiting: .orange
-        case .failed: .red
+        case .connected: .stateDone
+        case .connecting, .waiting: .stateWorking
+        case .failed: .stateFailed
         case .idle: .gray
         }
     }

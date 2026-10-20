@@ -62,7 +62,7 @@ struct FleetScreen: View {
             ForEach(workers) { w in
                 Button { model.destination = .worker(w.id) } label: {
                     WorkerRow(worker: w, activity: model.store.workerActivity[w.id])
-                        .card(tint: w.running != nil ? .accentColor : .secondary)
+                        .card(tint: w.running != nil ? .stateWorking : nil)
                 }
                 .buttonStyle(.plain)
                 .accessibilityIdentifier("fleet-\(w.id)")

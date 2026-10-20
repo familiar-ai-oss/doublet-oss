@@ -48,11 +48,11 @@ struct PlanProgress: View {
                 Spacer()
                 if summary.needsYou > 0 {
                     Label(summary.needsYou == 1 ? "1 needs you" : "\(summary.needsYou) need you", systemImage: "hand.raised.fill")
-                        .font(.caption.bold()).foregroundStyle(.orange)
+                        .font(.caption.bold()).foregroundStyle(.stateNeedsYou)
                 }
             }
             ProgressView(value: Double(summary.done), total: Double(max(summary.total, 1)))
-                .tint(summary.done == summary.total ? .green : .accentColor)
+                .tint(summary.done == summary.total ? .stateDone : .stateWorking)
             if let next = summary.next {
                 Text("Claude next: \(next.step.text)").font(.caption).foregroundStyle(.secondary).lineLimit(2)
             }
@@ -77,7 +77,7 @@ struct PlanStepRow: View {
                     .foregroundStyle(item.phase == .done || item.phase == .cancelled ? .secondary : .primary)
                 HStack(spacing: 6) {
                     Label(owner, systemImage: item.step.isClaudes ? "sparkles" : "cpu")
-                        .font(.caption.bold()).foregroundStyle(item.step.isClaudes ? Color.accentColor : .secondary)
+                        .font(.caption.bold()).foregroundStyle(item.step.isClaudes ? Color.stateWorking : .secondary)
                     Text(Self.label(item.phase, claudes: item.step.isClaudes)).font(.caption).foregroundStyle(Self.tint(item.phase))
                     if let p = item.task?.profile, p != "general" {
                         Text(p).font(.caption2.bold()).padding(.horizontal, 5).padding(.vertical, 1)
@@ -125,11 +125,11 @@ struct PlanStepRow: View {
     static func tint(_ p: PlanItem.Phase) -> Color {
         switch p {
         case .pending, .queued, .cancelled: .secondary
-        case .active: .accentColor
-        case .needsYou: .orange
-        case .review: .teal
-        case .done: .green
-        case .failed: .red
+        case .active: .stateWorking
+        case .needsYou: .stateNeedsYou
+        case .review: .stateWorking
+        case .done: .stateDone
+        case .failed: .stateFailed
         }
     }
 

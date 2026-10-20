@@ -76,14 +76,14 @@ struct PhoneStatusAccessory: View {
         } label: {
             HStack(spacing: 8) {
                 PulsingSymbol(systemName: n > 0 ? "hand.raised.fill" : s.busy ? s.symbol : "square.and.pencil",
-                              tint: n > 0 ? .orange : s.busy ? s.phase.tint : .accentColor, active: s.busy)
+                              tint: n > 0 ? .stateNeedsYou : s.busy ? s.phase.tint : .stateIdle, active: s.busy)
                 Text(n > 0 ? "\(n) waiting on you" : s.busy ? s.label : "Message Claude").lineLimit(1)
                 // How long it has waited on you; otherwise how long Claude has been at it.
                 if let since = n > 0 ? model.store.waitingSince : s.busy ? s.since : nil { Elapsed(since: since).foregroundStyle(.secondary) }
                 Spacer()
                 if s.busy {
                     Button("Stop", systemImage: "stop.fill") { model.send(.interrupt) }
-                        .labelStyle(.iconOnly).foregroundStyle(.red)
+                        .labelStyle(.iconOnly).foregroundStyle(.stateFailed)
                 }
             }
             .font(.callout)
@@ -107,7 +107,7 @@ struct NowScreen: View {
                 VStack(alignment: .leading, spacing: 10) {
                     SectionTitle(store.attention.isEmpty ? "Nothing needs you" : "Needs you · \(store.attention.count)",
                                  symbol: store.attention.isEmpty ? "checkmark.seal" : "hand.raised.fill",
-                                 tint: store.attention.isEmpty ? .secondary : .orange)
+                                 tint: store.attention.isEmpty ? .secondary : .stateNeedsYou)
                     if !store.attention.isEmpty { AttentionList() }
                 }
                 // Claude's plan for the live conversation: who is doing what, what's done, what Claude does next.

@@ -101,7 +101,7 @@ struct ApprovalRow: View {
                 Button(intent: RejectIntent(approvalId: approval.id)) {
                     Label("Reject", systemImage: "xmark").frame(maxWidth: .infinity)
                 }
-                .tint(.red)
+                .tint(.stateFailed)
                 if approval.risky {
                     Link(destination: DuetLink.approval(approval.id)) {
                         Label("Review in Doublet", systemImage: "exclamationmark.shield").frame(maxWidth: .infinity)
@@ -112,7 +112,7 @@ struct ApprovalRow: View {
                     Button(intent: ApproveIntent(approvalId: approval.id)) {
                         Label("Approve", systemImage: "checkmark").frame(maxWidth: .infinity)
                     }
-                    .tint(.green)
+                    .tint(.stateNeedsYou)
                 }
             }
             .font(.subheadline.bold())
@@ -132,7 +132,7 @@ struct WorkerSpeeds: View {
             ForEach(Array(ordered.prefix(3).enumerated()), id: \.element.id) { i, w in
                 VStack(alignment: .leading, spacing: 1) {
                     HStack(spacing: 4) {
-                        Circle().fill(w.busy ? Color.green : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
+                        Circle().fill(w.busy ? Color.stateWorking : Color.secondary.opacity(0.5)).frame(width: 6, height: 6)
                         Text(w.place.isEmpty ? w.name : w.place).font(.caption2.bold()).foregroundStyle(.secondary).lineLimit(1)
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 2) {
@@ -155,9 +155,9 @@ struct CompactTrailing: View {
 
     var body: some View {
         if state.waiting > 0 {
-            Text("\(state.waiting)").font(.caption.bold()).foregroundStyle(.orange)
+            Text("\(state.waiting)").font(.caption.bold()).foregroundStyle(.stateNeedsYou)
         } else if let w = state.mainWorker, w.busy, let rate = w.tokPerS {
-            Text("\(Int(rate.rounded()))").font(.caption.bold().monospacedDigit()).foregroundStyle(.green)
+            Text("\(Int(rate.rounded()))").font(.caption.bold().monospacedDigit()).foregroundStyle(.stateWorking)
                 .contentTransition(.numericText())
         } else if let since = state.sinceDate, state.busy {
             Text(since, style: .timer).font(.caption.monospacedDigit()).multilineTextAlignment(.trailing).frame(maxWidth: 44)
@@ -173,9 +173,9 @@ enum DuetLink {
 extension LiveContent {
     /// The app's colors: orange when something waits on you, purple while workers run, blue while Claude works.
     var tint: Color {
-        if waiting > 0 { return .orange }
+        if waiting > 0 { return .stateNeedsYou }
         if symbol == "person.2.wave.2" { return .purple }
-        return busy ? .blue : .green
+        return busy ? .stateWorking : .stateDone
     }
 }
 

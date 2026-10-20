@@ -21,7 +21,8 @@ extension EnvironmentValues {
 }
 
 extension WorkerView {
-    var statusColor: Color { enabled && available && loaded ? .green : enabled && available ? .orange : .secondary }
+    /// Loaded: done green. Reachable but not loaded, or off: idle.
+    var statusColor: Color { enabled && available && loaded ? .stateDone : .stateIdle }
 
     var statusText: String {
         if !enabled { return "Off" }
@@ -48,10 +49,9 @@ extension TaskEvent {
 extension LeadStatus.Phase {
     var tint: Color {
         switch self {
-        case .idle: .secondary
-        case .approval: .orange
-        case .workers: .purple
-        default: .accentColor
+        case .idle: .stateIdle
+        case .approval: .stateNeedsYou
+        default: .stateWorking
         }
     }
 }
@@ -68,22 +68,24 @@ struct Elapsed: View {
     }
 }
 
-/// A rounded "card" background that reads well in light and dark mode.
+/// A card: `slateRaised` with the hairline border, or a state's colour as its border (a decision is outlined in
+/// `stateNeedsYou`). State colours never fill a card.
 struct CardBackground: ViewModifier {
-    var tint: Color = .secondary
+    var tint: Color?
     @Environment(\.density) private var density
 
     func body(content: Content) -> some View {
+        let shape = RoundedRectangle(cornerRadius: DS.radiusCard, style: .continuous)
         content
             .padding(density.cardPadding)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background { RoundedRectangle(cornerRadius: 14, style: .continuous).fill(tint.opacity(0.09)) }
-            .overlay { RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(tint.opacity(0.18)) }
+            .background { shape.fill(.slateRaised) }
+            .overlay { shape.strokeBorder(tint ?? .slateLine, lineWidth: 1) }
     }
 }
 
 extension View {
-    func card(tint: Color = .secondary) -> some View { modifier(CardBackground(tint: tint)) }
+    func card(tint: Color? = nil) -> some View { modifier(CardBackground(tint: tint)) }
 }
 
 /// Display names for effort levels: "XHigh", not "Xhigh".
@@ -111,12 +113,11 @@ func taskStateSymbol(_ state: String) -> String {
 
 func taskStateTint(_ state: String) -> Color {
     switch state {
-    case "done": .green
-    case "stopped", "out_of_room": .orange
-    case "failed": .red
-    case "awaiting_swap": .orange
-    case "running": .accentColor
-    default: .secondary
+    case "done": .stateDone
+    case "failed": .stateFailed
+    case "awaiting_swap": .stateNeedsYou // a GPU swap to allow
+    case "running": .stateWorking
+    default: .stateIdle // queued, stopped, out of context, in the background, cancelled
     }
 }
 

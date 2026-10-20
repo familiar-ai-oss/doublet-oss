@@ -48,6 +48,8 @@ targets:
         DuetBundleID: $(DUET_BUNDLE_ID)
         DuetDefaultHubURL: $(DUET_HUB_URL)
         LSApplicationCategoryType: public.app-category.developer-tools
+        # Exo 2 (Duet/Resources/Fonts), the design system's display face, from the app's Resources folder.
+        ATSApplicationFontsPath: .
         NSMicrophoneUsageDescription: Doublet listens when you dictate or talk with Claude. What you say is recognized on this Mac.
         NSSpeechRecognitionUsageDescription: Doublet turns what you say into text on this Mac, with Apple's speech recognition.
         CFBundleURLTypes:
@@ -105,6 +107,8 @@ targets:
         NSSupportsLiveActivities: true
         NSSupportsLiveActivitiesFrequentUpdates: true
         UILaunchScreen: {}
+        # Exo 2 (Duet/Resources/Fonts), the design system's display face.
+        UIAppFonts: [Exo2.ttf]
         UIApplicationSceneManifest:
           UIApplicationSupportsMultipleScenes: true
         UISupportedInterfaceOrientations: [UIInterfaceOrientationPortrait, UIInterfaceOrientationLandscapeLeft, UIInterfaceOrientationLandscapeRight]

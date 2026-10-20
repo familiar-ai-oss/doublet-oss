@@ -140,7 +140,7 @@ struct ResumeBar: View {
             }
             if let error {
                 HStack {
-                    Text(error).font(.caption).foregroundStyle(.red)
+                    Text(error).font(.caption).foregroundStyle(.stateFailed)
                     Spacer()
                     Button("Dismiss", systemImage: "xmark") { self.error = nil }
                         .labelStyle(.iconOnly).buttonStyle(.borderless).controlSize(.small)

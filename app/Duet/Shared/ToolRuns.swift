@@ -179,8 +179,8 @@ struct AgentStatus: Identifiable, Equatable {
 
     var tint: Color {
         switch state {
-        case .failed: .orange
-        case .running, .background: .accentColor
+        case .failed: .stateFailed
+        case .running, .background: .stateWorking
         default: .secondary
         }
     }
@@ -252,8 +252,8 @@ struct AgentLaunchView: View {
     }
 
     private static func tint(_ agents: [AgentStatus]) -> Color {
-        if agents.contains(where: { $0.state == .failed }) { return .orange }
-        if agents.contains(where: \.isRunning) { return .accentColor }
+        if agents.contains(where: { $0.state == .failed }) { return .stateFailed }
+        if agents.contains(where: \.isRunning) { return .stateWorking }
         return .secondary
     }
 }
@@ -269,7 +269,7 @@ struct AgentStatusRow: View {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
                 Image(systemName: agent.symbol).foregroundStyle(agent.tint).frame(width: 16)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(Text(agent.label).foregroundStyle(agent.state == .failed ? AnyShapeStyle(.orange) : AnyShapeStyle(.primary))) \(Text("· \(agent.kind) · \(agent.words)").foregroundStyle(.secondary))")
+                    Text("\(Text(agent.label).foregroundStyle(agent.state == .failed ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.primary))) \(Text("· \(agent.kind) · \(agent.words)").foregroundStyle(.secondary))")
                         .lineLimit(density == .compact ? 2 : 1)
                     if let report = agent.report {
                         Text(report).font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -322,7 +322,7 @@ struct ToolRunView: View {
                                    removed: calls.compactMap(\.edit).map(\.removed).reduce(0, +))
                         if working { ProgressView().controlSize(.mini) }
                         if calls.contains(where: { $0.result?.isError == true }) {
-                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange).font(.caption)
+                            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.stateFailed).font(.caption)
                         }
                     }
                     .contentShape(Rectangle())
@@ -383,7 +383,7 @@ struct ToolCallRow: View {
             Button(action: primary) {
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Image(systemName: failed ? "exclamationmark.triangle" : symbol)
-                        .foregroundStyle(failed ? AnyShapeStyle(.orange) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(failed ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.secondary))
                         .frame(width: 16)
                     Text("\(Text(verb).foregroundStyle(.secondary)) \(Text(target).foregroundStyle(.primary))")
                         .lineLimit(density == .compact ? 1 : 2)
@@ -415,7 +415,7 @@ struct ToolCallRow: View {
                     EditDiffView(edit: edit)
                 } else if let result = call.result {
                     Text(result.preview).font(.caption.monospaced()).lineLimit(density == .dense ? 12 : 6)
-                        .foregroundStyle(result.isError ? AnyShapeStyle(.red) : AnyShapeStyle(.secondary))
+                        .foregroundStyle(result.isError ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.secondary))
                         .textSelection(.enabled)
                         .padding(.leading, 22)
                 }
@@ -484,8 +484,8 @@ struct EditCounts: View {
     var body: some View {
         if added > 0 || removed > 0 {
             HStack(spacing: 4) {
-                if added > 0 { Text("+\(added)").foregroundStyle(.green) }
-                if removed > 0 { Text("−\(removed)").foregroundStyle(.red) }
+                if added > 0 { Text("+\(added)").foregroundStyle(.codeAddition) }
+                if removed > 0 { Text("−\(removed)").foregroundStyle(.codeDeletion) }
             }
             .font(.caption.monospacedDigit().bold())
             .accessibilityElement(children: .ignore)
@@ -577,8 +577,8 @@ struct DiffLineView: View {
 
     private var tint: Color {
         switch line.kind {
-        case .added: .green
-        case .removed: .red
+        case .added: .codeAddition
+        case .removed: .codeDeletion
         case .kept: .clear
         }
     }
@@ -600,7 +600,7 @@ struct OutputLine: View {
                     Text(line.text).lineLimit(2)
                 } icon: {
                     Image(systemName: line.onDevice ? "apple.intelligence" : failed(line.text) ? "xmark.circle" : "checkmark.circle")
-                        .foregroundStyle(line.onDevice ? AnyShapeStyle(.secondary) : failed(line.text) ? AnyShapeStyle(.orange) : AnyShapeStyle(.green))
+                        .foregroundStyle(line.onDevice ? AnyShapeStyle(.secondary) : failed(line.text) ? AnyShapeStyle(.stateFailed) : AnyShapeStyle(.stateDone))
                 }
                 .font(.caption)
                 .foregroundStyle(.secondary)

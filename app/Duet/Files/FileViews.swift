@@ -104,7 +104,7 @@ struct FileBrowser: View {
 
     @ViewBuilder private func claudeRow(_ here: String) -> some View {
         if model.store.leadCwd == here {
-            Label("Claude works here", systemImage: "sparkles").foregroundStyle(.green)
+            Label("Claude works here", systemImage: "sparkles").foregroundStyle(.stateWorking)
         } else {
             Button {
                 confirmMove = true
@@ -247,8 +247,8 @@ struct GitBadge: View {
     /// The colors an editor gives git status: new green, deleted red, renamed blue, conflicted purple, changed orange.
     static func tint(_ code: String) -> Color {
         switch code {
-        case "A", "?": .green
-        case "D": .red
+        case "A", "?": .codeAddition
+        case "D": .codeDeletion
         case "R": .blue
         case "U": .purple
         default: .orange
