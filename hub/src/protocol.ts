@@ -181,7 +181,8 @@ export type TaskStats = { requests: number; inputTokens: number; outputTokens: n
 export type WorkerView = {
   id: string;
   label: string;
-  backend: 'llmd' | 'ollama' | 'apple' | 'claude';
+  // openai: an OpenAI-compatible endpoint (vLLM, Ollama's /v1, LM Studio, llama.cpp, a hosted API).
+  backend: 'llmd' | 'ollama' | 'apple' | 'claude' | 'openai';
   model: string;
   enabled: boolean;
   available: boolean; // backend reachable
@@ -201,7 +202,25 @@ export type WorkerView = {
   contextSize?: number;
   capabilities?: string[];
   unavailableReason?: string;
+  // An endpoint added in Settings (its id is the endpoint's): edited there, not in the fleet file.
+  fromSettings?: boolean;
 };
+
+// Settings → Agents (agents.ts): the coding agents on the hub's machine. `signIn`, when it needs signing in: how, and
+// what the hub looked for (the check is a best guess from files and the environment). `problem`: it's there but
+// `--version` failed (a broken install, or one that hangs), so it may not run.
+export type AgentId = 'claude' | 'codex' | 'cursor' | 'gemini';
+export type AgentState = 'ready' | 'needs_sign_in' | 'not_installed';
+export type AgentInfo = { id: AgentId; name: string; command: string; state: AgentState; path?: string; version?: string; signIn?: string; problem?: string };
+// `host`: the hub machine's name; `platform`: Node's (darwin, linux); `scannedAt`: ms since the epoch.
+export type AgentScan = { host: string; platform: string; scannedAt: number; agents: AgentInfo[] };
+
+// Settings → Agents: an OpenAI-compatible endpoint (endpoints.ts), which is a worker with the same id. Its API key never
+// leaves the hub: `hasApiKey` says whether one is set.
+export type EndpointView = { id: string; name: string; baseUrl: string; model: string; hasApiKey: boolean; enabled: boolean };
+// Test Connection: GET {baseUrl}/models. `models`: the ids it lists (to pick from); `error`, why not, for people;
+// `status`: the HTTP status, when it answered with an error.
+export type EndpointTest = { ok: boolean; models: string[]; error?: string; ms: number; status?: number };
 
 // A device's on-device model (Apple Intelligence), as it reports it.
 export type DiagnosticKind = 'crash' | 'hang' | 'freeze' | 'exit' | 'cpu' | 'disk' | 'launch';
@@ -269,7 +288,11 @@ export type ControlFrame =
   | { type: 'place_sent'; id: string; from: string; to: string; place: unknown; title: string; ts: number; write?: boolean }
   | { type: 'replay_done'; headSeq: number }
   // queued: a place sent to a device that's away, waiting for it.
-  | { type: 'ack'; ref: string; ok: boolean; error?: string; taskId?: string; ptyId?: string; diff?: string; truncated?: boolean; listing?: FsListing; file?: FsFile; image?: string; chatId?: string; files?: string[]; session?: OutsideSession; messages?: OutsideMessage[]; sessionId?: string; forked?: boolean; queued?: boolean }
+  // Settings: `scan` answers agents_list/agents_scan, `endpoints` endpoints_list, `endpoint` endpoint_add/update, `test`
+  // endpoint_test.
+  | { type: 'ack'; ref: string; ok: boolean; error?: string; taskId?: string; ptyId?: string; diff?: string; truncated?: boolean; listing?: FsListing; file?: FsFile; image?: string; chatId?: string; files?: string[]; session?: OutsideSession; messages?: OutsideMessage[]; sessionId?: string; forked?: boolean; queued?: boolean; scan?: AgentScan; endpoints?: EndpointView[]; endpoint?: EndpointView; test?: EndpointTest }
+  // The endpoints again, to every device, whenever one is added, changed or removed. Never stored or replayed.
+  | { type: 'endpoints'; endpoints: EndpointView[] }
   // A folder this client watches (fs_watch) changed: list it again.
   | { type: 'fs_changed'; path: string }
   | { type: 'fatal'; error: string }
@@ -371,7 +394,21 @@ export type ClientMsg =
   // The folders this client shows (its explorer's open folders), replacing the last set: changes come as fs_changed.
   | { type: 'fs_watch'; ref?: string; paths: string[] }
   // Every file under a folder (default: Claude's), as paths relative to it, for Quick Open. Answered in the ack.
-  | { type: 'fs_files'; ref?: string; path?: string };
+  | { type: 'fs_files'; ref?: string; path?: string }
+  // Settings → Agents. agents_list: the last scan of coding agents on the hub's machine (scanning the first time);
+  // agents_scan: a fresh one. Both answer with the ack's `scan`.
+  | { type: 'agents_list'; ref?: string }
+  | { type: 'agents_scan'; ref?: string }
+  // OpenAI-compatible endpoints: list them (ack `endpoints`), add or change one (ack `endpoint`), remove one (refused
+  // while it has a task). update's apiKey: a new key, null to remove it, absent to keep it. Each change also reaches
+  // every device as an `endpoints` frame, and the fleet as a worker.
+  | { type: 'endpoints_list'; ref?: string }
+  | { type: 'endpoint_add'; ref?: string; name: string; baseUrl: string; model: string; apiKey?: string; enabled?: boolean }
+  | { type: 'endpoint_update'; ref?: string; id: string; name?: string; baseUrl?: string; model?: string; apiKey?: string | null; enabled?: boolean }
+  | { type: 'endpoint_remove'; ref?: string; id: string }
+  // Test Connection (ack `test`): a saved endpoint by `id` (with its stored key unless `apiKey` is given, and its URL
+  // unless `baseUrl` is), or one not yet saved by `baseUrl` (and `apiKey`).
+  | { type: 'endpoint_test'; ref?: string; id?: string; baseUrl?: string; apiKey?: string };
 
 export function isSequenced(f: ServerFrame): f is HubEvent {
   return typeof (f as HubEvent).seq === 'number';

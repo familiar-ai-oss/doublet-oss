@@ -60,3 +60,13 @@
 {"type":"side_title","ref":"58","chatId":"sc-abc123","title":"Why the Hub Uses Two GPUs"}
 {"type":"diagnostic","ref":"59","id":"f-1a2b","kind":"freeze","summary":"Freeze 2.9 s on the conversation","at":"2026-10-19T09:02:11Z","durationMs":2900,"build":"0.1 (1) debug","os":"iPadOS 27.2","model":"iPad16,6","context":{"place":"lead","recent":["tab lift","drop: split right"]}}
 {"type":"diagnostic","ref":"60","id":"mx-crash-1","kind":"crash","summary":"Crash: EXC_CRASH (SIGABRT)","payload":"{\"callStackTree\":{}}"}
+{"type":"agents_list","ref":"61"}
+{"type":"agents_scan","ref":"62"}
+{"type":"endpoints_list","ref":"63"}
+{"type":"endpoint_add","ref":"64","name":"LM Studio","baseUrl":"http://127.0.0.1:1234/v1","model":"qwen3-coder-30b","apiKey":"local-key"}
+{"type":"endpoint_update","ref":"65","id":"lm-studio","model":"gemma4-26b","apiKey":null,"enabled":false}
+{"type":"endpoint_update","ref":"66","id":"lm-studio","name":"LM Studio (Mac)","apiKey":"new-key"}
+{"type":"endpoint_remove","ref":"67","id":"lm-studio"}
+{"type":"endpoint_test","ref":"68","baseUrl":"http://127.0.0.1:1234/v1","apiKey":"local-key"}
+{"type":"endpoint_test","ref":"69","id":"lm-studio"}
+{"type":"endpoint_add","ref":"70","name":"vLLM","baseUrl":"http://my-gpu-box:8000/v1","model":"qwen3-coder","enabled":false}

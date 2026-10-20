@@ -125,6 +125,16 @@ func eventsRoundTripWithoutLosingFields(file: String) throws {
                                       build: "0.1 (1) debug", os: "iPadOS 27.2", model: "iPad16,6",
                                       context: ["place": .string("lead"), "recent": .array([.string("tab lift"), .string("drop: split right")])])), "59"),
         (.diagnostic(DiagnosticReport(kind: "crash", id: "mx-crash-1", summary: "Crash: EXC_CRASH (SIGABRT)", payload: "{\"callStackTree\":{}}")), "60"),
+        (.agentsList, "61"),
+        (.agentsScan, "62"),
+        (.endpointsList, "63"),
+        (.endpointAdd(name: "LM Studio", baseUrl: "http://127.0.0.1:1234/v1", model: "qwen3-coder-30b", apiKey: "local-key"), "64"),
+        (.endpointUpdate(id: "lm-studio", model: "gemma4-26b", apiKey: .some(nil), enabled: false), "65"),
+        (.endpointUpdate(id: "lm-studio", name: "LM Studio (Mac)", apiKey: "new-key"), "66"),
+        (.endpointRemove(id: "lm-studio"), "67"),
+        (.endpointTest(baseUrl: "http://127.0.0.1:1234/v1", apiKey: "local-key"), "68"),
+        (.endpointTest(id: "lm-studio"), "69"),
+        (.endpointAdd(name: "vLLM", baseUrl: "http://my-gpu-box:8000/v1", model: "qwen3-coder", enabled: false), "70"),
     ]
     let hub = try lines("client.jsonl")
     #expect(hub.count == swift.count, "hub/test/client-fixtures.test.ts and this list must change together (then `make fixtures`)")
@@ -134,6 +144,29 @@ func eventsRoundTripWithoutLosingFields(file: String) throws {
         let theirs = try JSONSerialization.jsonObject(with: line) as! NSObject
         #expect(mine == theirs, "message \(i): \(m)")
     }
+}
+
+@Test func settingsFramesDecode() throws {
+    let frames = try lines("settings.jsonl").map { try JSONDecoder().decode(ServerFrame.self, from: $0) }
+    guard case .ack(let scanAck) = frames[0], let scan = scanAck.scan else { Issue.record("no scan"); return }
+    #expect(scan.agents.map(\.id) == ["claude", "codex", "cursor", "gemini"])
+    #expect(scan.agents.map(\.state) == [.ready, .needsSignIn, .notInstalled, .ready])
+    #expect(scan.agents[0].version == "2.1.303")
+    #expect(scan.agents[1].signIn?.contains("codex login") == true)
+    #expect(scan.agents[3].problem != nil)
+    guard case .ack(let list) = frames[1], let endpoints = list.endpoints else { Issue.record("no endpoints"); return }
+    #expect(endpoints.map(\.id) == ["lm-studio", "vllm"])
+    #expect(endpoints[0].hasApiKey && !endpoints[1].hasApiKey && !endpoints[1].enabled)
+    guard case .ack(let added) = frames[2] else { Issue.record("no ack"); return }
+    #expect(added.endpoint == endpoints[0])
+    guard case .ack(let ok) = frames[4], case .ack(let refused) = frames[5] else { Issue.record("no tests"); return }
+    #expect(ok.test?.summary == "Connected · 3 models found")
+    #expect(refused.test?.ok == false && refused.test?.status == 401)
+    #expect(refused.test?.summary == "the API key was refused: Invalid API key")
+    #expect(frames[7] == .endpoints(endpoints))
+    #expect(frames[8] == .endpoints([]))
+    guard case .event(let e) = frames[9], case .fleet(let f) = e.body else { Issue.record("no fleet"); return }
+    #expect(f.workers.allSatisfy { $0.isOpenAI && $0.fromSettings == true })
 }
 
 @MainActor

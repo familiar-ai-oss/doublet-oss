@@ -33,6 +33,8 @@ import { fetchRules } from './web.ts';
 import { PROFILE_IDS, type ProfileId } from './profiles.ts';
 import { FolderWatch } from './watch.ts';
 import { fullDiff } from './worker.ts';
+import { EndpointStore } from './endpoints.ts';
+import { isSettingsMsg, Settings } from './settings.ts';
 
 const env = process.env;
 const cfg = {
@@ -97,12 +99,15 @@ const lastTurn = events.since(0).reduce((t, e) => ('turn' in e && typeof e.turn 
 // with DUET_APPLE_FOR_LEAD=1, since local workers are free too and far stronger.
 const apple = new AppleDevices(log);
 const appleForLead = env.DUET_APPLE_FOR_LEAD === '1';
+// OpenAI-compatible endpoints added in Settings, kept in the state folder. They join the fleet file's workers (or, with
+// no fleet file, stand in for the default Ollama worker).
+const endpoints = new EndpointStore(cfg.stateDir);
 // Workers reach their backends only through this proxy; the fleet decides each request's route.
 let fleet: Fleet;
 const proxy = await startWorkerProxy((w) => fleet.route(w), (s) => fleet.recordRequest(s), cfg.proxyPort);
 fleet = new Fleet(
   {
-    workers: loadWorkers(cfg.fleetFile),
+    workers: loadWorkers(cfg.fleetFile, { hasEndpoints: endpoints.list().length > 0 }),
     llmdAdmin: cfg.llmdAdmin,
     modelsToml: cfg.modelsToml,
     claimsAllDevices: cfg.llmdClaimsAll,
@@ -120,6 +125,11 @@ fleet = new Fleet(
 // Kinds of Claude subagent that ran before keep their place in the fleet. Any still running stopped with the hub.
 fleet.seedSubagents(events.since(0).flatMap((e) => (e.type === 'task' && e.worker.startsWith('claude-') ? [e.worker] : [])));
 fleet.endOrphans(events.since(0));
+
+// Every connected device's sender, for frames that go to all of them (the endpoints, as Settings changes them).
+const clients = new Set<(f: ServerFrame) => void>();
+const settings = new Settings(endpoints, fleet, (f) => { for (const c of clients) c(f); });
+settings.sync();
 
 const dialogue = new Dialogue((b) => events.append(b));
 dialogue.appleForLead = appleForLead;
@@ -382,6 +392,7 @@ function onConnection(ws: WebSocket, login: string | undefined): void {
     terminals.detachAll(sink);
     folders.close();
     detachOutside();
+    clients.delete(send);
     if (device) {
       apple.disconnected(device, send);
       devices.disconnected(device, send);
@@ -398,6 +409,7 @@ function onConnection(ws: WebSocket, login: string | undefined): void {
       if (msg.protocol !== PROTOCOL_VERSION) { send({ type: 'fatal', error: `protocol ${msg.protocol} unsupported; hub speaks ${PROTOCOL_VERSION}` }); return ws.close(4004); }
       if (!tokens.verify(msg.device, msg.token)) { send({ type: 'fatal', error: 'bad device token' }); return ws.close(4005, 'auth'); }
       device = msg.device;
+      clients.add(send);
       devices.connected(device, send, msg.kind);
       // A client ahead of the log saw a previous hub's log; start it over from the beginning.
       const reset = msg.lastSeq > events.headSeq || msg.lastSeq < 0;
@@ -419,6 +431,10 @@ function onConnection(ws: WebSocket, login: string | undefined): void {
     const by = device;
     const ref = ('ref' in msg && msg.ref) || '';
     try {
+      if (isSettingsMsg(msg)) {
+        send({ type: 'ack', ref, ok: true, ...await settings.handle(msg) });
+        return;
+      }
       switch (msg.type) {
         case 'prompt':
           if (!msg.text?.trim()) throw new Error('empty prompt');

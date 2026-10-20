@@ -2,10 +2,12 @@
 // The proxy forces the backend model, applies the worker's effort and temperature, refuses requests a swap
 // hasn't been approved for, and measures each request (TTFB, tokens, tok/s) for the UI. A local server's "doesn't fit
 // in my context" error goes back as Anthropic's "prompt is too long", which Claude Code answers by compacting and
-// trying again (context.ts).
+// trying again (context.ts). A worker on an OpenAI-compatible endpoint has its requests translated to chat completions
+// and back (openai.ts).
 import http from 'node:http';
 import { applyEffort, type EffortTableId } from './effort.ts';
 import { overflowAsPromptTooLong } from './context.ts';
+import { forwardOpenAI } from './openai.ts';
 
 export type Route = {
   upstream: string; // base URL, e.g. http://127.0.0.1:8800
@@ -14,6 +16,11 @@ export type Route = {
   level: string;
   temperature?: number;
   taskId?: string;
+  /** The API the upstream speaks: Anthropic's Messages (llmd, Ollama's /v1/messages; the default) or OpenAI's chat
+   *  completions (an endpoint added in Settings, whose upstream is its base URL ending in /v1). */
+  api?: 'anthropic' | 'openai';
+  /** openai: the endpoint's key, sent as a bearer token. */
+  apiKey?: string;
 };
 
 export type RequestStats = {
@@ -46,6 +53,13 @@ export async function startWorkerProxy(resolve: Resolver, onRequest: (s: Request
     req.on('data', (c) => chunks.push(c));
     req.on('end', () => {
       let body = Buffer.concat(chunks);
+      if (route.api === 'openai') {
+        void forwardOpenAI(route, worker, path, body, res, onRequest).catch((e) => {
+          if (!res.headersSent) res.writeHead(500, { 'content-type': 'application/json' });
+          res.end(JSON.stringify({ type: 'error', error: { type: 'api_error', message: `duet proxy: ${e instanceof Error ? e.message : e}` } }));
+        });
+        return;
+      }
       let sent: Record<string, unknown> = {};
       if (body.length && /json/.test(req.headers['content-type'] ?? '')) {
         const j = JSON.parse(body.toString()) as Record<string, unknown>;

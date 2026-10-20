@@ -9,15 +9,31 @@ import { fileURLToPath } from 'node:url';
 
 let found: string | null | undefined;
 
+export const runnable = (p: string) => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } };
+
+/** The first runnable `name` in `dirs`, or null. */
+export function findIn(name: string, dirs: readonly string[]): string | null {
+  return dirs.filter(Boolean).map((d) => join(d, name)).find(runnable) ?? null;
+}
+
+/** Where the hub looks for `claude`: PATH, then where Claude Code's installers put it (a service's PATH may leave those
+ *  out). Agent discovery (agents.ts) adds the places other CLIs install to. */
+export function claudeDirs(env: NodeJS.ProcessEnv = process.env, home = homedir()): string[] {
+  return [...(env.PATH ?? '').split(delimiter), join(home, '.local/bin'), join(home, '.claude/local')];
+}
+
+/** The `claude` to run for this environment: DUET_CLAUDE_PATH if set (null if it can't run), else the first on
+ *  claudeDirs(). Uncached. */
+export function findClaude(env: NodeJS.ProcessEnv = process.env, home = homedir()): string | null {
+  const set = env.DUET_CLAUDE_PATH;
+  if (set) return runnable(set) ? set : null;
+  return findIn('claude', claudeDirs(env, home));
+}
+
 /** The path of the `claude` to run, or null when there's none. */
 export function claudePath(): string | null {
   if (found !== undefined) return found;
-  const runnable = (p: string) => { try { accessSync(p, constants.X_OK); return true; } catch { return false; } };
-  const set = process.env.DUET_CLAUDE_PATH;
-  if (set) return (found = runnable(set) ? set : null);
-  // PATH, then where Claude Code's installers put it (a service's PATH may leave those out).
-  const dirs = [...(process.env.PATH ?? '').split(delimiter), join(homedir(), '.local/bin'), join(homedir(), '.claude/local')];
-  return (found = dirs.filter(Boolean).map((d) => join(d, 'claude')).find(runnable) ?? null);
+  return (found = findClaude());
 }
 
 export const NO_CLAUDE = 'Claude Code isn\'t installed for the hub\'s user: install it, run `claude` once and sign in, then ' +

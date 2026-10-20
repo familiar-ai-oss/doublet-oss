@@ -191,7 +191,11 @@ public struct WorkerView: Codable, Sendable, Equatable, Identifiable {
     public var unavailableReason: String? = nil
     /// Claude's subagents: every one of this kind running now (several can run at once).
     public var active: [String]? = nil
+    /// An endpoint added in Settings (its id is the endpoint's): edited there, not in the hub's fleet file.
+    public var fromSettings: Bool? = nil
     public var isApple: Bool { backend == "apple" }
+    /// An OpenAI-compatible endpoint (vLLM, Ollama's /v1, LM Studio, llama.cpp, a hosted API).
+    public var isOpenAI: Bool { backend == "openai" }
     /// One kind of Claude's own subagents (its Agent tool): Claude starts them, inside its turns.
     public var isClaude: Bool { backend == "claude" }
 }
@@ -575,6 +579,68 @@ public struct HubEvent: Codable, Sendable, Equatable {
     }
 }
 
+// MARK: Settings → Agents
+
+/// A coding agent on the hub's machine, from its scan: Claude Code, Codex CLI, Cursor CLI or Gemini CLI.
+public struct AgentInfo: Codable, Sendable, Equatable, Hashable, Identifiable {
+    public enum State: String, Codable, Sendable { case ready, needsSignIn = "needs_sign_in", notInstalled = "not_installed" }
+    /// "claude", "codex", "cursor" or "gemini".
+    public let id: String
+    public let name: String
+    /// What it's run as ("cursor-agent").
+    public let command: String
+    public let state: State
+    public let path: String?
+    public let version: String?
+    /// When it needs signing in: how, and what the hub looked for (its check is a best guess from files and the
+    /// environment).
+    public let signIn: String?
+    /// It's there, but `--version` failed (a broken install, or one that hangs), so it may not run.
+    public let problem: String?
+    public init(id: String, name: String, command: String, state: State, path: String? = nil, version: String? = nil, signIn: String? = nil, problem: String? = nil) {
+        self.id = id; self.name = name; self.command = command; self.state = state; self.path = path; self.version = version; self.signIn = signIn; self.problem = problem
+    }
+}
+
+/// A scan of the hub's machine for coding agents. `host`: its name; `platform`: "darwin", "linux"…
+public struct AgentScan: Codable, Sendable, Equatable, Hashable {
+    public let host: String
+    public let platform: String
+    /// Milliseconds since the epoch.
+    public let scannedAt: Double
+    public let agents: [AgentInfo]
+    public var scannedDate: Date { Date(timeIntervalSince1970: scannedAt / 1000) }
+}
+
+/// An OpenAI-compatible endpoint the hub keeps, which is a worker with the same id. Its API key never leaves the hub:
+/// `hasApiKey` says whether one is set.
+public struct EndpointView: Codable, Sendable, Equatable, Hashable, Identifiable {
+    public let id: String
+    public let name: String
+    /// Ends in /v1.
+    public let baseUrl: String
+    public let model: String
+    public let hasApiKey: Bool
+    public let enabled: Bool
+    public init(id: String, name: String, baseUrl: String, model: String, hasApiKey: Bool, enabled: Bool) {
+        self.id = id; self.name = name; self.baseUrl = baseUrl; self.model = model; self.hasApiKey = hasApiKey; self.enabled = enabled
+    }
+}
+
+/// Test Connection (GET {baseUrl}/models): the model ids it lists, or why it failed (for people), and how long it took.
+/// `status`: the HTTP status when it answered with an error.
+public struct EndpointTest: Codable, Sendable, Equatable, Hashable {
+    public let ok: Bool
+    public let models: [String]
+    public let error: String?
+    public let ms: Double
+    public let status: Int?
+    /// "Connected · 3 models found", or the error.
+    public var summary: String {
+        ok ? "Connected · \(models.count) model\(models.count == 1 ? "" : "s") found" : error ?? "Couldn't connect"
+    }
+}
+
 /// Everything the hub sends: sequenced events and unsequenced control frames.
 /// The hub's answer to one message: ok or an error, and what the request asked for.
 public struct AckFrame: Decodable, Sendable, Equatable {
@@ -591,6 +657,9 @@ public struct AckFrame: Decodable, Sendable, Equatable {
     public let sessionId: String?; public let forked: Bool?
     /// send_place: the device is away, so the place waits for it (it gets it when it next connects).
     public let queued: Bool?
+    /// Settings: agents_list/agents_scan's scan, endpoints_list's endpoints, endpoint_add/update's endpoint, and
+    /// endpoint_test's result.
+    public let scan: AgentScan?; public let endpoints: [EndpointView]?; public let endpoint: EndpointView?; public let test: EndpointTest?
 }
 
 /// One of the user's devices (one per device token): whether the app is connected there now, when it was last seen,
@@ -680,9 +749,11 @@ public enum ServerFrame: Decodable, Sendable, Equatable {
     case devices([DeviceInfo])
     /// A place another device sent here.
     case placeSent(PlaceSent)
+    /// The hub's OpenAI-compatible endpoints again, whenever one is added, changed or removed (from any device).
+    case endpoints([EndpointView])
     case unknown(type: String)
 
-    private enum K: String, CodingKey { case seq, type, `protocol`, device, headSeq, replayFrom, reset, ref, ok, error, terminals, id, data, code, path, sessions, sessionId, messages, devices }
+    private enum K: String, CodingKey { case seq, type, `protocol`, device, headSeq, replayFrom, reset, ref, ok, error, terminals, id, data, code, path, sessions, sessionId, messages, devices, endpoints }
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: K.self)
@@ -704,6 +775,7 @@ public enum ServerFrame: Decodable, Sendable, Equatable {
         case "outside_sessions": self = .outsideSessions(try c.decode([OutsideSession].self, forKey: .sessions))
         case "outside_messages": self = .outsideMessages(sessionId: try c.decode(String.self, forKey: .sessionId), messages: try c.decode([OutsideMessage].self, forKey: .messages))
         case "fs_changed": self = .fsChanged(path: try c.decode(String.self, forKey: .path))
+        case "endpoints": self = .endpoints(try c.decode([EndpointView].self, forKey: .endpoints))
         case let t: self = .unknown(type: t)
         }
     }
@@ -792,6 +864,20 @@ public enum ClientMessage: Sendable, Equatable {
     /// What this device has open now (its tabs and windows; `current` the one in front), replacing what it said before:
     /// the other devices see it in their device lists.
     case openPlaces(places: [OpenPlace], current: Int?)
+    /// Settings → Agents. The last scan of coding agents on the hub's machine (scanning the first time), or a fresh
+    /// one: the ack's `scan`.
+    case agentsList
+    case agentsScan
+    /// OpenAI-compatible endpoints: list (ack `endpoints`), add or change (ack `endpoint`), remove (refused while it
+    /// has a task). Each change also reaches every device as `.endpoints`. Base URLs end in /v1.
+    case endpointsList
+    case endpointAdd(name: String, baseUrl: String, model: String, apiKey: String? = nil, enabled: Bool? = nil)
+    /// `apiKey`: nil keeps it, `.some(nil)` removes it, `.some(key)` replaces it.
+    case endpointUpdate(id: String, name: String? = nil, baseUrl: String? = nil, model: String? = nil, apiKey: String?? = nil, enabled: Bool? = nil)
+    case endpointRemove(id: String)
+    /// Test Connection (ack `test`): a saved endpoint by id (its stored key unless `apiKey` is given, its URL unless
+    /// `baseUrl` is), or an unsaved one by `baseUrl` and `apiKey`.
+    case endpointTest(id: String? = nil, baseUrl: String? = nil, apiKey: String? = nil)
 
     /// The wire object. Optional fields are omitted when nil, except explicit nulls the hub gives meaning to.
     public func json(ref: String?) -> JSONValue {
@@ -887,6 +973,19 @@ public enum ClientMessage: Sendable, Equatable {
         case .openPlaces(let places, let current):
             o = ["type": .string("open_places"), "places": JSONValue(encoding: places)]
             if let current { o["current"] = .number(Double(current)) }
+        case .agentsList: o = ["type": .string("agents_list")]
+        case .agentsScan: o = ["type": .string("agents_scan")]
+        case .endpointsList: o = ["type": .string("endpoints_list")]
+        case .endpointAdd(let name, let baseUrl, let model, let apiKey, let enabled):
+            o = ["type": .string("endpoint_add"), "name": .string(name), "baseUrl": .string(baseUrl), "model": .string(model)]; put("apiKey", apiKey)
+            if let enabled { o["enabled"] = .bool(enabled) }
+        case .endpointUpdate(let id, let name, let baseUrl, let model, let apiKey, let enabled):
+            o = ["type": .string("endpoint_update"), "id": .string(id)]; put("name", name); put("baseUrl", baseUrl); put("model", model)
+            if let apiKey { o["apiKey"] = apiKey.map { .string($0) } ?? .null }
+            if let enabled { o["enabled"] = .bool(enabled) }
+        case .endpointRemove(let id): o = ["type": .string("endpoint_remove"), "id": .string(id)]
+        case .endpointTest(let id, let baseUrl, let apiKey):
+            o = ["type": .string("endpoint_test")]; put("id", id); put("baseUrl", baseUrl); put("apiKey", apiKey)
         }
         if let ref { o["ref"] = .string(ref) }
         return .object(o)

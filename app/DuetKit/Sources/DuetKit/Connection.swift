@@ -40,6 +40,8 @@ public enum ConnectionEvent: Sendable {
     /// The user's devices (on connecting, and whenever one comes or goes), and a place another device sent here.
     case devices([DeviceInfo])
     case placeSent(PlaceSent)
+    /// The hub's OpenAI-compatible endpoints, whenever they change.
+    case endpoints([EndpointView])
     /// Reconnect accounting, sent only when it changes (so the store never has to ask the actor per event).
     case stats(gaps: Int, duplicates: Int)
 }
@@ -53,6 +55,8 @@ public struct Ack: Sendable {
     public var session: OutsideSession? = nil; public var messages: [OutsideMessage]? = nil
     public var sessionId: String? = nil; public var forked: Bool? = nil
     public var queued: Bool? = nil
+    /// Settings: the agent scan, the endpoints, one endpoint, a connection test.
+    public var scan: AgentScan? = nil; public var endpoints: [EndpointView]? = nil; public var endpoint: EndpointView? = nil; public var test: EndpointTest? = nil
 }
 
 public struct HubError: LocalizedError, Sendable {
@@ -194,7 +198,8 @@ public actor HubConnection {
             guard let c = acks.removeValue(forKey: a.ref) else { return }
             if a.ok {
                 c.resume(returning: Ack(ref: a.ref, taskId: a.taskId, ptyId: a.ptyId, diff: a.diff, truncated: a.truncated, listing: a.listing, file: a.file, image: a.image, chatId: a.chatId, files: a.files,
-                                        session: a.session, messages: a.messages, sessionId: a.sessionId, forked: a.forked, queued: a.queued))
+                                        session: a.session, messages: a.messages, sessionId: a.sessionId, forked: a.forked, queued: a.queued,
+                                        scan: a.scan, endpoints: a.endpoints, endpoint: a.endpoint, test: a.test))
             } else {
                 c.resume(throwing: HubError(message: a.error ?? "refused"))
             }
@@ -210,6 +215,7 @@ public actor HubConnection {
         case .outsideMessages(let id, let m): continuation.yield(.outsideMessages(sessionId: id, messages: m))
         case .devices(let l): continuation.yield(.devices(l))
         case .placeSent(let p): continuation.yield(.placeSent(p))
+        case .endpoints(let l): continuation.yield(.endpoints(l))
         case .unknown:
             break
         }

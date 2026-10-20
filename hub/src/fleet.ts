@@ -1,5 +1,5 @@
-// Fleet scheduler: workers with one slot each and a FIFO queue, availability from llmd and Ollama,
-// and a confirmation step before any task that would load a model onto a GPU (which evicts what's there).
+// Fleet scheduler: workers with one slot each and a FIFO queue, availability from llmd, Ollama and OpenAI-compatible
+// endpoints, and a confirmation step before any task that would load a model onto a GPU (which evicts what's there).
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { appleLabel, appleReason, type AppleDevices } from './apple.ts';
@@ -13,15 +13,19 @@ import type { SubagentInfo, SubagentOutcome } from './lead.ts';
 import type { RequestStats, Route } from './proxy.ts';
 import { evidence, runWorker, type ToolCount, type WorkerRun } from './worker.ts';
 import { servedContext, tomlContexts } from './context.ts';
+import { listModels } from './endpoints.ts';
 
 export type WorkerDef = {
   id: string;
   label: string;
   // apple: a connected device's on-device model (added and removed as devices report it, never configured).
   // claude: one kind of Claude's own subagents (its Agent tool), added when Claude first starts one.
-  backend: 'llmd' | 'ollama' | 'apple' | 'claude';
+  // openai: an OpenAI-compatible server (chat completions with tool calls); url is its base URL, ending in /v1. Added
+  // in Settings (endpoints.ts) or in a fleet file.
+  backend: 'llmd' | 'ollama' | 'apple' | 'claude' | 'openai';
   url: string; // backend base URL
-  model: string; // llmd served id, or Ollama model name
+  model: string; // llmd served id, Ollama model name, or the model an OpenAI-compatible server lists
+  apiKey?: string; // openai: sent as a bearer token; never shown to clients
   table: EffortTableId;
   enabled: boolean;
   temperature?: number;
@@ -46,7 +50,11 @@ export function takes(w: Pick<WorkerDef, 'takes' | 'model'>): 'any' | 'small' {
   return b && Number(b[1]) < 15 ? 'small' : 'any';
 }
 
-const isLocal = (w: Pick<WorkerDef, 'backend'>) => w.backend === 'llmd' || w.backend === 'ollama';
+const isLocal = (w: Pick<WorkerDef, 'backend'>) => w.backend === 'llmd' || w.backend === 'ollama' || w.backend === 'openai';
+
+/** How often an OpenAI-compatible endpoint is asked for its models: less often than local servers, since it may be a
+ *  hosted API. Adding, changing or switching one on asks at once. */
+const OPENAI_CHECK_MS = 30_000;
 
 type Candidate = Pick<WorkerDef, 'backend' | 'enabled' | 'model' | 'takes'> & { available: boolean; loaded: boolean; running: unknown; queue: unknown[] };
 
@@ -143,6 +151,8 @@ export type FleetBridge = {
 type WorkerState = WorkerDef & {
   effort: string; available: boolean; loaded: boolean; running: Task | null; queue: Task[]; tokPerS: number | null;
   active?: Task[]; // claude: every subagent of this kind running now
+  fromSettings?: boolean; // an endpoint added in Settings (syncEndpoints), not the fleet file
+  checkedAt?: number; // openai: when its models were last listed
 };
 
 /** The task a subagent call is shown as, from Claude's Agent tool call id (clients derive it the same way). */
@@ -175,6 +185,7 @@ export class Fleet {
   private lastCatalog = '';
   private chatModels: string[] = []; // llmd models from models.toml that have an effort table
   private timer: NodeJS.Timeout | null = null;
+  private refreshing: Promise<void> | null = null;
   private cfg: FleetConfig;
   private emit: (e: EventBody) => void;
   private bridge: FleetBridge | null = null;
@@ -225,7 +236,9 @@ export class Fleet {
         return `- ${w.id}: ${w.label}, Apple's on-device model (${apple?.variant ? `${apple.variant}, ` : ''}${apple?.contextSize ? `${apple.contextSize}-token context` : 'a 4K–8K context'}) — ${status}; text only: summaries, extraction, classification. It can't run tools or read files: pass \`files\` and the hub sends their text (long text is read in parts).`;
       }
       const fit = takes(w) === 'small' ? 'small, mechanical tasks only' : 'any task';
-      return `- ${w.id}: ${w.label} — ${status}; ${fit}; effort levels ${EFFORT_TABLES[w.table].levels.join('/')} (default ${w.effort})`;
+      const levels = EFFORT_TABLES[w.table].levels;
+      const effort = levels.length ? `effort levels ${levels.join('/')} (default ${w.effort})` : 'no effort setting';
+      return `- ${w.id}: ${w.label} — ${status}; ${fit}; ${effort}`;
     });
     if (!lines.length) return '';
     return ['Each worker is one model on its own hardware and runs ONE task at a time; more tasks for it wait in its queue. Spread parallel work across workers.', ...lines].join('\n');
@@ -319,7 +332,14 @@ export class Fleet {
     }));
   }
 
+  /** One refresh at a time: a forced one (an endpoint added) waits for the one under way, then runs. */
   async refresh(): Promise<void> {
+    while (this.refreshing) await this.refreshing;
+    this.refreshing = this.refreshOnce().finally(() => { this.refreshing = null; });
+    return this.refreshing;
+  }
+
+  private async refreshOnce(): Promise<void> {
     const ready = new Set<string>();
     let llmdUp = false;
     if (this.cfg.llmdAdmin) try {
@@ -342,6 +362,18 @@ export class Fleet {
       } else if (w.backend === 'llmd') {
         w.available = llmdUp;
         w.loaded = ready.has(w.model);
+      } else if (w.backend === 'openai') {
+        if (!w.enabled) { w.available = false; w.loaded = false; continue; }
+        if (w.checkedAt && Date.now() - w.checkedAt < OPENAI_CHECK_MS) continue;
+        w.checkedAt = Date.now();
+        try {
+          const models = await listModels(w.url, w.apiKey, 4000);
+          w.available = true;
+          // A server that lists nothing (some don't) is taken at its word that the model is there.
+          const m = models.find((x) => x.id === w.model);
+          w.loaded = !models.length || Boolean(m);
+          if (m?.context) this.served.set(w.model, { key: `openai:${w.url}`, tokens: m.context });
+        } catch { w.available = false; w.loaded = false; }
       } else if (w.enabled) {
         try {
           const tags = await (await fetch(`${w.url}/api/tags`, { signal: AbortSignal.timeout(2000) })).json() as { models: { name: string }[] };
@@ -378,6 +410,7 @@ export class Fleet {
       tokPerS: w.tokPerS, verifiedEffort: w.backend === 'apple' || VERIFIED_EFFORT.has(w.model),
       running: w.running?.id ?? null, queue: w.queue.map((t) => t.id),
     };
+    if (w.fromSettings) v.fromSettings = true;
     if (w.backend === 'claude') {
       v.active = (w.active ?? []).map((t) => t.id);
       v.running = v.active[0] ?? null;
@@ -741,7 +774,10 @@ export class Fleet {
     const t = w.running;
     if (!t) return { refuse: `worker ${workerId} has no running task` };
     if (w.backend === 'llmd' && !w.loaded && !t.swapApproved) return { refuse: `${w.model} is not loaded and no swap was approved` };
-    return { upstream: w.url, model: w.model, table: w.table, level: t.effort, temperature: w.temperature, taskId: t.id };
+    return {
+      upstream: w.url, model: w.model, table: w.table, level: t.effort, temperature: w.temperature, taskId: t.id,
+      ...(w.backend === 'openai' ? { api: 'openai' as const, apiKey: w.apiKey } : {}),
+    };
   }
 
   recordRequest(s: RequestStats): void {
@@ -781,6 +817,46 @@ export class Fleet {
     this.schedule(this.workers.get(t.worker)!);
   }
 
+  /** Whether a worker has a task running or waiting. */
+  busy(id: string): boolean {
+    const w = this.workers.get(id);
+    return Boolean(w && (w.running || w.queue.length || w.active?.length));
+  }
+
+  /** Ids in use: the fleet file's workers, Apple's and Claude's, and endpoints'. */
+  workerIds(): string[] {
+    return [...this.workers.keys()];
+  }
+
+  /**
+   * The workers added in Settings, the whole set each time (endpoints.ts): new ones join, removed ones go, changed ones
+   * take their new URL, key, model or name (a running task's next request goes to the new place). A fleet file's worker
+   * with the same id wins. Its effort and temperature stay as set here.
+   */
+  syncEndpoints(defs: WorkerDef[]): void {
+    const want = new Map(defs.map((d) => [d.id, d]));
+    for (const w of [...this.workers.values()]) {
+      if (!w.fromSettings || want.has(w.id)) continue;
+      for (const t of w.queue) this.cancel(t.id, 'duet');
+      w.running?.abort?.abort();
+      this.workers.delete(w.id);
+    }
+    for (const d of defs) {
+      const w = this.workers.get(d.id);
+      if (w && !w.fromSettings) continue;
+      if (!w) {
+        this.workers.set(d.id, { ...d, effort: EFFORT_TABLES[d.table].default, available: false, loaded: false, running: null, queue: [], tokPerS: null, fromSettings: true });
+        continue;
+      }
+      const moved = w.url !== d.url || w.model !== d.model || w.apiKey !== d.apiKey;
+      Object.assign(w, { label: d.label, url: d.url, model: d.model, apiKey: d.apiKey, enabled: d.enabled });
+      if (moved) { w.checkedAt = undefined; w.tokPerS = null; w.loaded = false; }
+      if (!d.enabled) w.checkedAt = undefined;
+    }
+    this.publish();
+    void this.refresh();
+  }
+
   setWorker(id: string, opts: { effort?: string; temperature?: number | null; enabled?: boolean; model?: string }): void {
     const w = this.workers.get(id);
     if (!w) throw new Error(`unknown worker ${id}`);
@@ -803,6 +879,7 @@ export class Fleet {
     }
     if (opts.temperature !== undefined) w.temperature = opts.temperature ?? undefined;
     if (opts.enabled !== undefined) w.enabled = opts.enabled;
+    if (opts.enabled) w.checkedAt = undefined;
     this.publish();
     if (opts.enabled) void this.refresh();
   }
@@ -889,8 +966,14 @@ export function stoppedResult(s: Stopped, output: string[]): string {
   return `${why}${tail ? ` Its progress so far, in its own words:\n${tail}` : ' It wrote nothing about its progress; the changes below are what it did.'}`;
 }
 
-export function loadWorkers(file: string): WorkerDef[] {
-  if (!existsSync(file)) return defaultWorkers();
+/**
+ * The workers from configuration: a fleet file's, exactly as before; with none, the one Ollama worker defaultWorkers()
+ * makes. `hasEndpoints`: endpoints were added in Settings, which then stand in for that implicit default (unless
+ * DUET_OLLAMA_URL or DUET_OLLAMA_MODEL asks for it). Settings' endpoints join these (Fleet.syncEndpoints).
+ */
+export function loadWorkers(file: string, opts: { hasEndpoints?: boolean; env?: NodeJS.ProcessEnv } = {}): WorkerDef[] {
+  const env = opts.env ?? process.env;
+  if (!existsSync(file)) return opts.hasEndpoints && !env.DUET_OLLAMA_URL && !env.DUET_OLLAMA_MODEL ? [] : defaultWorkers(env);
   const j = JSON.parse(readFileSync(file, 'utf8')) as { workers: WorkerDef[] };
   return j.workers;
 }

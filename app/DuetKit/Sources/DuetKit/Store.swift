@@ -163,6 +163,9 @@ public final class DuetStore {
     public private(set) var outsideMessages: [String: [OutsideMessage]] = [:]
     /// The user's devices (the hub's list, this one included): which are online now, when each was last seen.
     public private(set) var devices: [DeviceInfo] = []
+    /// The hub's OpenAI-compatible endpoints (Settings → Agents), as it last sent them: kept current by its `endpoints`
+    /// frames once `listEndpoints()` has run.
+    public private(set) var endpoints: [EndpointView] = []
     /// The last place another device sent here (Send to iPad); `onPlaceSent` hears each one as it comes.
     public private(set) var lastPlaceSent: PlaceSent?
     /// The files Claude and its workers changed, by path: the latest change to each.
@@ -356,6 +359,38 @@ public final class DuetStore {
         try await send(.openPlaces(places: places, current: current))
     }
 
+    // MARK: Settings → Agents
+
+    /// The coding agents on the hub's machine: its last scan, or (`rescan`) a fresh one.
+    public func agentScan(rescan: Bool = false) async throws -> AgentScan {
+        guard let scan = try await send(rescan ? .agentsScan : .agentsList).scan else { throw HubError(message: "the hub sent no scan") }
+        return scan
+    }
+
+    @discardableResult
+    public func listEndpoints() async throws -> [EndpointView] {
+        let l = try await send(.endpointsList).endpoints ?? []
+        endpoints = l
+        return l
+    }
+
+    /// Add an endpoint (`.endpointAdd`) or change one (`.endpointUpdate`): the hub's copy of it.
+    @discardableResult
+    public func saveEndpoint(_ m: ClientMessage) async throws -> EndpointView {
+        guard let e = try await send(m).endpoint else { throw HubError(message: "the hub sent no endpoint") }
+        return e
+    }
+
+    public func removeEndpoint(_ id: String) async throws {
+        try await send(.endpointRemove(id: id))
+    }
+
+    /// Test Connection: a saved endpoint by id, or an unsaved one by URL and key.
+    public func testEndpoint(id: String? = nil, baseUrl: String? = nil, apiKey: String? = nil) async throws -> EndpointTest {
+        guard let t = try await send(.endpointTest(id: id, baseUrl: baseUrl, apiKey: apiKey)).test else { throw HubError(message: "the hub sent no result") }
+        return t
+    }
+
     // MARK: sessions running outside Duet
 
     /// Follow one live: its recent messages now (`outsideMessages[sessionId]`), then each new one as it comes.
@@ -407,6 +442,7 @@ public final class DuetStore {
             let seen = Set(had.map(\.uuid))
             outsideMessages[id] = had + m.filter { !seen.contains($0.uuid) }
         case .devices(let l): devices = l
+        case .endpoints(let l): endpoints = l
         case .placeSent(let p):
             // The hub sends it again on each connection until it hears it arrived. If this doesn't get there, the next
             // connection brings it again, and the app opens each one once.
