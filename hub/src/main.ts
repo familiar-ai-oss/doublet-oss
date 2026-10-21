@@ -11,7 +11,7 @@ import { WebSocketServer, type WebSocket } from 'ws';
 import { Apns } from './apns.ts';
 import { checkUpgrade, Tokens } from './auth.ts';
 import { Devices } from './devices.ts';
-import { Dialogue, TODO_TOOLS } from './dialogue.ts';
+import { Dialogue, leadGuidance, TODO_TOOLS } from './dialogue.ts';
 import { defaultFleetFile, Fleet, loadWorkers } from './fleet.ts';
 import { droppedAtStart, Lead, leadAuth, leadEnv } from './lead.ts';
 import { claudePath, claudeVersion, NO_CLAUDE, olderThan, sdkClaudeVersion } from './claude.ts';
@@ -36,6 +36,8 @@ import { fullDiff } from './worker.ts';
 import { EndpointStore } from './endpoints.ts';
 import { isSettingsMsg, Settings } from './settings.ts';
 import { McpGateway } from './agents/mcp-gateway.ts';
+import { CodexAdapter } from './agents/codex.ts';
+import { AcpAdapter, CURSOR_ACP, GEMINI_ACP } from './agents/acp.ts';
 
 const env = process.env;
 const cfg = {
@@ -173,8 +175,12 @@ events.subscribe(events.headSeq, (e) => annotations.onEvent(e));
 // DUET_MCP_TRANSPORT=http or stdio: Claude reaches Doublet's tools through the gateway other agents use, instead of
 // in-process (to check both give it the same tools). Unset: in-process.
 const mcpTransport = process.env.DUET_MCP_TRANSPORT === 'http' || process.env.DUET_MCP_TRANSPORT === 'stdio' ? process.env.DUET_MCP_TRANSPORT : null;
-const mcpGateway = mcpTransport ? new McpGateway(log) : null;
-if (mcpGateway) log(`Doublet's tools for the lead: over ${mcpTransport}, gateway on 127.0.0.1:${await mcpGateway.listen()}`);
+// DUET_LEAD_AGENT=codex, cursor or gemini: that agent leads instead of Claude Code (until the app picks the lead per
+// conversation), with Doublet's tools through the gateway. DUET_LEAD_MODEL is then one of its models.
+const LEAD_AGENTS = ['claude', 'codex', 'cursor', 'gemini'] as const;
+const leadAgent = (LEAD_AGENTS as readonly string[]).includes(process.env.DUET_LEAD_AGENT ?? '') ? process.env.DUET_LEAD_AGENT as typeof LEAD_AGENTS[number] : 'claude';
+const mcpGateway = mcpTransport || leadAgent !== 'claude' ? new McpGateway(log) : null;
+if (mcpGateway) log(`Doublet's tools for the ${leadAgent} lead: over ${mcpTransport ?? 'http'}, gateway on 127.0.0.1:${await mcpGateway.listen()}`);
 const lead = new Lead(
   {
     model: cfg.model,
@@ -188,6 +194,10 @@ const lead = new Lead(
     mcpServers: () => ({ duet: dialogue.leadServer() }),
     hooks: dialogue.leadHooks(),
     ...(mcpGateway && mcpTransport ? { mcpGateway: { gateway: mcpGateway, transport: mcpTransport } } : {}),
+    ...(leadAgent !== 'claude' && mcpGateway ? (() => {
+      const extras = { mcpServers: () => ({ duet: dialogue.leadServer() }), gateway: mcpGateway, instructions: () => leadGuidance(dialogue.appleForLead) };
+      return { adapter: leadAgent === 'codex' ? new CodexAdapter(extras) : new AcpAdapter(leadAgent === 'cursor' ? CURSOR_ACP : GEMINI_ACP, extras) };
+    })() : {}),
     onTurnStart: () => dialogue.onLeadTurnStart(),
     onIdle: () => { dialogue.onLeadIdle(); void continueWaiting(); },
     onNotesTaken: (ids, turn) => annotations.taken(ids, turn),
