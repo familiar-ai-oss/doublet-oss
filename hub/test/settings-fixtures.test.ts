@@ -11,10 +11,8 @@ const vllm: EndpointView = { id: 'vllm', name: 'vLLM', baseUrl: 'http://my-gpu-b
 export const SETTINGS_FRAMES: ServerFrame[] = [
   { type: 'ack', ref: '61', ok: true, scan: { host: 'my-gpu-box', platform: 'linux', scannedAt: 1792500000000, agents: [
     { id: 'claude', name: 'Claude Code', command: 'claude', state: 'ready', path: '/home/you/.local/bin/claude', version: '2.1.303' },
-    { id: 'codex', name: 'Codex CLI', command: 'codex', state: 'needs_sign_in', path: '/usr/local/bin/codex', version: '0.47.0', signIn: 'Run `codex login` on this machine (or set OPENAI_API_KEY). (Looked for: OPENAI_API_KEY, $CODEX_HOME/auth.json (~/.codex/auth.json).)' },
+    { id: 'codex', name: 'Codex CLI', command: 'codex', state: 'needs_sign_in', path: '/usr/local/bin/codex', version: '0.47.0', signIn: 'Run `codex login` on this machine (or set OPENAI_API_KEY). (Looked for: `codex login status`.)', problem: '`codex --version` failed (no answer within 5 s): it may not run. Reinstall it?' },
     { id: 'cursor', name: 'Cursor CLI', command: 'agent', state: 'not_installed' },
-    { id: 'agy', name: 'Antigravity CLI', command: 'agy', state: 'blocked', path: '/home/you/.local/bin/agy', version: '1.4.3', signIn: 'Signed in with a Google account: Antigravity\'s terms don\'t allow apps like Doublet to use a personal Google AI plan. Set GEMINI_API_KEY for the hub and "modelProvider": "gemini" in ~/.gemini/antigravity-cli/settings.json, or use Gemini Enterprise.' },
-    { id: 'gemini', name: 'Gemini CLI', command: 'gemini', state: 'ready', path: '/usr/local/bin/gemini', problem: '`gemini --version` failed (no answer within 5 s): it may not run. Reinstall it?' },
   ] } },
   { type: 'ack', ref: '63', ok: true, endpoints: [lm, vllm] },
   { type: 'ack', ref: '64', ok: true, endpoint: lm },

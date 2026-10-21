@@ -1,5 +1,5 @@
 // Any agent that speaks the Agent Client Protocol (agentclientprotocol.com) as the lead: JSON-RPC 2.0 over stdio, one
-// message per line. Cursor's CLI (`agent acp`) is the first; Gemini CLI (`gemini --acp`) and others take only a spec.
+// message per line. Cursor's CLI (`agent acp`) is the first; another ACP agent takes only a spec.
 //
 // ACP takes one prompt at a time: what you write while a turn runs waits for it to end and starts the next (Claude Code
 // does the same with a prompt that comes too late for the running turn). Permission requests become approval cards;
@@ -7,12 +7,11 @@
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createInterface } from 'node:readline';
 import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
-import { agentDirs, defaultScanEnv, findCursor } from '../agents.ts';
-import { findIn } from '../claude.ts';
+import { defaultScanEnv, findCursor } from '../agents.ts';
 import { baseEnv } from '../lead.ts';
 import type { AgentId, EffortLevel, LeadModel, PermissionMode, ToolUse } from '../protocol.ts';
 import { McpGateway } from './mcp-gateway.ts';
-import { Refused, type AgentAdapter, type AgentCaps, type AgentSession, type ApprovalAnswer, type Image, type SessionHost, type SessionOptions } from './adapter.ts';
+import { REJECTED, Refused, type AgentAdapter, type AgentCaps, type AgentSession, type ApprovalAnswer, type Image, type SessionHost, type SessionOptions } from './adapter.ts';
 
 /** One ACP agent: how to run it, and what of the hub's it maps onto its own. */
 export type AcpSpec = {
@@ -30,7 +29,7 @@ export type AcpSpec = {
 };
 
 export const ACP_CAPS: AgentCaps = {
-  steerMidTurn: false, subagents: false, resume: true, fork: false, liveModelSwitch: true, effort: false,
+  steerMidTurn: false, subagents: true, resume: true, fork: false, liveModelSwitch: true, effort: false,
   approvals: 'callback', promptContext: false, cost: false,
 };
 
@@ -41,13 +40,6 @@ export const CURSOR_ACP: AcpSpec = {
   find: () => findCursor(defaultScanEnv()),
   mode: (m) => (m === 'plan' ? 'plan' : 'agent'),
   fromMode: (id) => (id === 'plan' ? 'plan' : null),
-};
-
-/** Gemini CLI, for an API key or Vertex (its personal Google sign-in no longer works; agents.ts says so). */
-export const GEMINI_ACP: AcpSpec = {
-  id: 'gemini', name: 'Gemini CLI', args: ['--acp'], env: ['GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI', 'GOOGLE_CLOUD_PROJECT', 'GOOGLE_CLOUD_LOCATION', 'GOOGLE_APPLICATION_CREDENTIALS'],
-  find: () => findIn('gemini', agentDirs(process.env, defaultScanEnv().home)),
-  mode: () => null,
 };
 
 type Rpc = { jsonrpc?: '2.0'; id?: number | string; method?: string; params?: any; result?: any; error?: { code: number; message: string } };
@@ -98,6 +90,8 @@ export class AcpSession implements AgentSession {
    *  announces an MCP call as "MCP: tool" with no input, and names it in its next update); their result comes later. */
   private open = new Map<string, { call: any; shown: boolean }>();
   private models_: LeadModel[] = [];
+  /** Cursor's subagents running now (cursor/task), by their tool call. */
+  private tasks = new Set<string>();
   private mode: PermissionMode;
   private tokens: string[] = [];
   private guidance: string | null = null;
@@ -219,6 +213,7 @@ export class AcpSession implements AgentSession {
     }
     if (m.id !== undefined && m.method) return this.request(m.id, m.method, m.params);
     if (m.method === 'session/update') this.update(m.params?.update ?? {});
+    if (m.method === 'cursor/task') this.task(m.params ?? {});
   }
 
   /** Exposed for tests: one line from the agent. */
@@ -269,10 +264,20 @@ export class AcpSession implements AgentSession {
     if (done) this.toolEnd(t.call);
   }
 
+  /** Cursor started a subagent (cursor/task): a worker, until its tool call ends. */
+  private task(p: { toolCallId?: string; description?: string; prompt?: string; subagentType?: unknown }): void {
+    if (this.loading || !p.toolCallId || this.tasks.has(p.toolCallId)) return;
+    this.tasks.add(p.toolCallId);
+    const kind = typeof p.subagentType === 'string' ? p.subagentType : (p.subagentType as { custom?: string } | undefined)?.custom ?? 'unspecified';
+    this.host.subagents?.start(p.toolCallId, kind === 'unspecified' ? 'general-purpose' : kind, p.prompt ?? p.description ?? '', p.description ? { label: p.description } : {});
+  }
+
   private toolEnd(u: any): void {
     if (!this.open.delete(u.toolCallId)) return;
     this.host.event({ type: 'activity' });
-    this.host.event({ type: 'tool_end', toolUseId: u.toolCallId, isError: u.status === 'failed', output: toolText(u) });
+    const output = toolText(u);
+    if (this.tasks.delete(u.toolCallId)) this.host.subagents?.end(u.toolCallId, u.status === 'failed' ? 'failed' : 'done', output);
+    this.host.event({ type: 'tool_end', toolUseId: u.toolCallId, isError: u.status === 'failed', output });
     // Clears an edit the hub kept for this call: ACP agents run the call they asked about, so there's none to report.
     this.host.afterTool(u.toolCallId);
   }
@@ -285,8 +290,11 @@ export class AcpSession implements AgentSession {
   }
 
   /** A request from the agent: a permission becomes an approval card (or runs, for read-only kinds and Bypass
-   *  Permissions); anything Doublet can't do is refused. Every request is answered, or the agent waits for ever. */
+   *  Permissions), Cursor's plan and questions their cards; anything Doublet can't do is refused. Every request is
+   *  answered, or the agent waits for ever. */
   private request(id: number | string, method: string, p: any): void {
+    if (method === 'cursor/create_plan') return this.planReady(id, p);
+    if (method === 'cursor/ask_question') return this.questions(id, p);
     if (method !== 'session/request_permission') {
       this.host.log(`${this.spec.name} asked ${method}, which Doublet doesn't handle: refused`);
       return this.write({ id, error: { code: -32601, message: `Doublet doesn't handle ${method}` } });
@@ -303,10 +311,71 @@ export class AcpSession implements AgentSession {
       respond: (a: ApprovalAnswer) => {
         if (done) return;
         done = true;
-        choose(a.allow ? pick(['allow_once', 'allow_always']) : a.interrupt ? undefined : pick(['reject_once', 'reject_always']));
+        // An agent can't run an edited call: this one is refused, and it's told what you want run instead.
+        if (a.allow) {
+          const command = a.input.command;
+          if (use.name !== 'Bash' || typeof command !== 'string' || command === (use.input as { command?: unknown }).command) return choose(pick(['allow_once', 'allow_always']));
+          choose(pick(['reject_once', 'reject_always']));
+          return this.tell(`[duet] The user edited that command before approving it. Run this instead: ${command}`);
+        }
+        choose(a.interrupt ? undefined : pick(['reject_once', 'reject_always']));
+        if (!a.interrupt && a.message && a.message !== REJECTED) this.tell(`[duet] The user rejected that call: ${a.message}`);
       },
       onWithdrawn: () => {},
     });
+  }
+
+  /** Cursor's plan (cursor/create_plan, in plan mode): the plan's approval card, as Claude's ExitPlanMode. Approving
+   *  leaves plan mode and starts the work, as Cursor's Build does; rejecting keeps it planning, with your note. */
+  private planReady(id: number | string, p: { plan?: string; name?: string; overview?: string; todos?: unknown[] }): void {
+    const plan = p.plan || [p.name, p.overview].filter(Boolean).join('\n\n');
+    let done = false;
+    this.host.event({
+      type: 'approval', tool: 'ExitPlanMode', input: { plan, ...(p.name ? { name: p.name } : {}) }, toolUseId: (p as { toolCallId?: string }).toolCallId,
+      respond: (a: ApprovalAnswer) => {
+        if (done) return;
+        done = true;
+        // Answers nest their outcome, as ACP's permission answers do: { outcome: { outcome: "accepted" } }.
+        if (!a.allow) return this.write({ id, result: { outcome: a.interrupt ? { outcome: 'cancelled' } : { outcome: 'rejected', reason: a.message } } });
+        this.write({ id, result: { outcome: { outcome: 'accepted' } } });
+        const edited = typeof a.input.plan === 'string' && a.input.plan !== plan ? a.input.plan : null;
+        this.mode = 'default';
+        this.host.event({ type: 'mode', mode: 'default' });
+        void this.applyMode().catch((e) => this.host.log(`${this.spec.name} kept its mode: ${e}`));
+        this.tell(edited ? `[duet] The user approved your plan, with their edits. Implement this plan now:\n\n${edited}` : '[duet] The user approved your plan. Implement it now.');
+      },
+      onWithdrawn: () => {},
+    });
+  }
+
+  /** Cursor's questions (cursor/ask_question): the question card, as Claude's AskUserQuestion. Answers go back by
+   *  option id. */
+  private questions(id: number | string, p: { toolCallId?: string; title?: string; questions?: { id: string; prompt: string; options?: { id: string; label: string }[]; allowMultiple?: boolean }[] }): void {
+    const qs = p.questions ?? [];
+    let done = false;
+    this.host.event({
+      type: 'approval', tool: 'AskUserQuestion', toolUseId: p.toolCallId,
+      input: { questions: qs.map((q) => ({ question: q.prompt, ...(p.title ? { header: p.title } : {}), options: (q.options ?? []).map((o) => ({ label: o.label })), multiSelect: !!q.allowMultiple })) },
+      respond: (a: ApprovalAnswer) => {
+        if (done) return;
+        done = true;
+        if (!a.allow) return this.write({ id, result: { outcome: a.interrupt ? { outcome: 'cancelled' } : { outcome: 'skipped', reason: a.message } } });
+        const given = (a.input.answers ?? {}) as Record<string, string>;
+        const answers = qs.map((q) => {
+          const picked = (given[q.prompt] ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+          return { questionId: q.id, selectedOptionIds: (q.options ?? []).filter((o) => picked.includes(o.label)).map((o) => o.id) };
+        });
+        this.write({ id, result: { outcome: { outcome: 'answered', answers } } });
+      },
+      onWithdrawn: () => {},
+    });
+  }
+
+  /** Something the hub tells the agent itself: the next prompt (ACP takes one at a time). */
+  private tell(text: string): void {
+    const prompt = [{ type: 'text', text }];
+    if (this.running) this.waiting.push(prompt);
+    else this.prompt(prompt, undefined, true);
   }
 
   // ---- what the hub asks ----
@@ -322,8 +391,9 @@ export class AcpSession implements AgentSession {
 
   /** Runs one prompt as a turn. The hub hears it was taken now, with anything to add (ACP has no hidden context, so it
    *  goes in the prompt), and Doublet's guidance goes with a new session's first prompt. */
-  private prompt(prompt: unknown[], text?: string): void {
-    const extra = this.host.beforePrompt(text ?? (prompt.find((b: any) => b.type === 'text') as { text?: string } | undefined)?.text);
+  private prompt(prompt: unknown[], text?: string, own = false): void {
+    // The hub's own message isn't one of yours, so it isn't announced as taken (the hub opens a turn for it).
+    const extra = own ? undefined : this.host.beforePrompt(text ?? (prompt.find((b: any) => b.type === 'text') as { text?: string } | undefined)?.text);
     const blocks = [...(this.guidance ? [{ type: 'text', text: this.guidance }] : []), ...prompt, ...(extra ? [{ type: 'text', text: extra }] : [])];
     this.guidance = null;
     this.running = true;
@@ -374,9 +444,15 @@ export class AcpSession implements AgentSession {
 
   async setEffort(_level: EffortLevel | null): Promise<void> {}
 
-  endTurn(): void {}
+  /** Subagents end with their turn. */
+  endTurn(): void {
+    if (this.tasks.size) this.host.subagents?.stopped();
+    this.tasks.clear();
+  }
 
   release(): void {
+    if (this.tasks.size) this.host.subagents?.stopped(true);
+    this.tasks.clear();
     for (const t of this.tokens.splice(0)) this.extras.gateway?.unregister(t);
   }
 

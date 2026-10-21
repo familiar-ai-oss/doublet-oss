@@ -1,9 +1,10 @@
-// Side chats: a quick question beside the conversation. Claude answers in a copy of the conversation (a forked session),
-// so it knows what's been said and done, while the conversation itself never sees the question. Read-only: Claude can
-// read and search files in its folder, but not change anything, run commands or hand out work. A follow-up continues
-// the same copy. Its messages are sequenced events tagged with the conversation it was asked in, so every device has it.
-import { forkSession, getSessionMessages, query } from '@anthropic-ai/claude-agent-sdk';
-import type { McpSdkServerConfigWithInstance, SDKMessage, SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
+// Side chats: a quick question beside the conversation. The lead's agent (Claude Code, Codex or Cursor: agents/aside.ts)
+// answers in a copy of the conversation, so it knows what's been said and done, while the conversation itself never sees
+// the question. Read-only: it can read and search files in its folder, but not change anything, run commands or hand
+// out work. A follow-up continues the same copy. Its messages are sequenced events tagged with the conversation it was
+// asked in, so every device has it. ("Claude" in names here means the lead's agent, whichever it is.)
+import { ClaudeAside, type Aside, type ClaudeAsideDeps, type ForkSource, type Forked } from './agents/aside.ts';
+import type { McpSdkServerConfigWithInstance } from '@anthropic-ai/claude-agent-sdk';
 import { randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
@@ -14,23 +15,22 @@ import type { RouteLog } from './routelog.ts';
 import { classify, route, type QuestionClass, type Route } from './routing.ts';
 import { evidence, present, scout, type ScoutOutcome, type ScoutRun } from './scout.ts';
 import { fetchRules } from './web.ts';
-import { claudeExecutable } from './claude.ts';
+
+export { lastReply, type ForkSource } from './agents/aside.ts';
 
 export const SIDE_TOOLS = ['Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch'];
 // Everything but fetching runs without asking; pages open on documentation and code-hosting sites only (a side chat
 // can't ask, so any other site is refused).
 export const SIDE_ALLOWED = ['Read', 'Glob', 'Grep', 'WebSearch', ...fetchRules()];
-// Claude answers with Haiku (quick) unless the question needs judgment (design, debugging, outside knowledge) or a
-// local answer couldn't settle it: then Sonnet. "auto": the side chat routes each question (routing.ts).
-const DEFAULT_MODEL = 'haiku';
-const JUDGMENT_MODEL = 'sonnet';
+// The agent answers with its quick model (Claude: Haiku) unless the question needs judgment (design, debugging,
+// outside knowledge) or a local answer couldn't settle it: then its judgment model (Sonnet). "auto": the side chat routes
+// each question (routing.ts).
 const JUDGMENT: readonly QuestionClass[] = ['design', 'debug', 'external'];
 const AUTO = 'auto';
 const MAX_ANSWERING = 3;
 const MAX_TURNS = 16;
 const ABOUT_MAX = 8000;
 
-type Forked = 'whole' | 'before_turn' | 'none';
 type Chat = {
   id: string; title: string; model: string; by: string; about?: SideAbout; conversationId?: string;
   sessionId?: string; forked?: Forked; abort?: AbortController;
@@ -65,18 +65,16 @@ export type NoteThread = {
   answer?: { text: string; model?: string; local?: boolean; checked?: Checked; ms?: number; more?: string; escalated?: string };
 };
 
-/** The conversation a new side chat copies: Claude's session, whether Claude Code has its transcript yet, whether a turn
- *  is in progress, and the folder it works in. */
-export type ForkSource = { sessionId?: string; transcribed: boolean; busy: boolean; cwd: string };
-
-// The SDK calls side chats make, replaceable in tests.
-export type SideDeps = { query: typeof query; forkSession: typeof forkSession; getSessionMessages: typeof getSessionMessages };
+// The SDK calls Claude's asides make, replaceable in tests.
+export type SideDeps = ClaudeAsideDeps;
 
 export type SideConfig = {
   source: () => ForkSource;
   env: () => Record<string, string>;
   log: (m: string) => void;
   deps?: Partial<SideDeps>;
+  /** Who answers: the lead's agent. Default: Claude Code (with `env` and `deps`). */
+  aside?: Aside;
   /** Local models, to answer questions about the code first (routing.ts); without them Claude answers everything. */
   local?: {
     ask(prompt: string, size: TaskSize, by: string, onTask: (taskId: string) => void): Promise<ScoutRun>;
@@ -111,14 +109,17 @@ export const SIDE_VOICE =
 export class SideChats {
   private chats = new Map<string, Chat>();
   private cfg: SideConfig;
-  private deps: SideDeps;
+  private aside: Aside;
   private emit: (e: EventBody) => void;
 
   constructor(cfg: SideConfig, emit: (e: EventBody) => void) {
     this.cfg = cfg;
     this.emit = emit;
-    this.deps = { query, forkSession, getSessionMessages, ...cfg.deps };
+    this.aside = cfg.aside ?? new ClaudeAside({ env: cfg.env, allowed: SIDE_ALLOWED, log: cfg.log, deps: cfg.deps });
   }
+
+  private get quickModel(): string { return this.aside.quick; }
+  private get judgmentModel(): string { return this.aside.judgment; }
 
   /** After a restart, side chats continue from the log. One that was answering when the hub stopped says so. */
   seed(events: EventBody[]): void {
@@ -226,8 +227,8 @@ export class SideChats {
     if (chat.abort) throw new Error('this note is still being answered');
     chat.abort = new AbortController();
     chat.route = 'claude';
-    if (!chat.chosen) chat.model = JUDGMENT_MODEL;
-    this.state(chat, 'answering', { activity: 'Asking Claude' });
+    if (!chat.chosen) chat.model = this.judgmentModel;
+    this.state(chat, 'answering', { activity: `Asking ${this.aside.name}` });
     void this.run(chat, text, o.image, !chat.sessionId, false, { escalated: o.escalated, extra: [this.earlier(chat), o.extra].filter(Boolean).join('\n\n'), t0: Date.now(), note: o });
   }
 
@@ -271,7 +272,7 @@ export class SideChats {
       void this.runLocal(chat, text, r, a.voice === true);
     } else {
       // Claude: the model picked by hand, or the one this kind of question needs.
-      if (!chat.chosen && chat.route !== 'claude') chat.model = JUDGMENT.includes(r.cls) ? JUDGMENT_MODEL : DEFAULT_MODEL;
+      if (!chat.chosen && chat.route !== 'claude') chat.model = JUDGMENT.includes(r.cls) ? this.judgmentModel : this.quickModel;
       chat.route = 'claude';
       this.cfg.routes?.write({ surface: 'side', id: chat.id, by, cls: r.cls, to: 'claude', why: r.why, outcome: 'claude' });
       void this.run(chat, text, a.image, !chat.sessionId, a.voice === true, { extra: this.earlier(chat), t0: Date.now() });
@@ -289,8 +290,8 @@ export class SideChats {
     if (this.answering() >= MAX_ANSWERING) throw new Error(`${MAX_ANSWERING} side chats are answering already; wait for one to finish`);
     chat.abort = new AbortController();
     chat.route = 'claude';
-    if (!chat.chosen) chat.model = JUDGMENT_MODEL;
-    this.state(chat, 'answering', { activity: 'Asking Claude' });
+    if (!chat.chosen) chat.model = this.judgmentModel;
+    this.state(chat, 'answering', { activity: `Asking ${this.aside.name}` });
     this.cfg.routes?.write({ surface: 'side', id: chat.id, by, cls: classify(last.question), to: 'claude', why: 'you asked Claude', outcome: 'override', worker: last.worker });
     const check = `[duet] ${last.worker ?? 'A local model'} answered the question below in this side chat, and the user asked you to check it. Its answer:\n${last.scouted?.answer.slice(0, 2000) ?? ''}`;
     void this.run(chat, last.question, undefined, !chat.sessionId, false, { escalated: 'you asked Claude', extra: [this.earlier(chat), check].filter(Boolean).join('\n\n'), t0: Date.now() });
@@ -340,7 +341,7 @@ export class SideChats {
     // On to Claude, with what the local model found.
     const why = o.verdict.pass ? '' : o.verdict.why;
     chat.route = 'claude';
-    if (!chat.chosen) chat.model = JUDGMENT_MODEL;
+    if (!chat.chosen) chat.model = this.judgmentModel;
     this.cfg.routes?.write({ surface: 'side', id: chat.id, by: chat.by, cls: r.cls, to: 'local', why: r.why, outcome: 'escalated', worker: o.worker, ms: Date.now() - t0, citations, tries: o.tries, escalated: why });
     await this.run(chat, text, undefined, !chat.sessionId, voice, { escalated: why, extra: [this.earlier(chat), evidence(o)].filter(Boolean).join('\n\n'), t0 });
   }
@@ -381,7 +382,7 @@ export class SideChats {
   private async run(chat: Chat, text: string, image: SideAsk['image'], fresh: boolean, voice = false, more: { escalated?: string; extra?: string; t0?: number; note?: NoteAsk } = {}): Promise<void> {
     const abort = chat.abort!;
     let error: string | undefined;
-    if (chat.model === AUTO) chat.model = JUDGMENT_MODEL;
+    if (chat.model === AUTO) chat.model = this.judgmentModel;
     let first = true;
     // Answering a note: its answer is what Claude said without reaching for a tool, plus the diagrams it drew.
     const note = more.note;
@@ -389,51 +390,37 @@ export class SideChats {
     const drawn: string[] = [];
     const diagrams = note && this.cfg.diagrams ? this.cfg.diagrams((id) => drawn.push(id)) : undefined;
     try {
-      let resume = chat.sessionId;
+      let from: string | undefined;
       if (fresh) {
-        const f = await this.fork();
+        const f = await this.aside.fork(this.cfg.source());
         chat.forked = f.forked;
-        resume = f.sessionId;
+        from = f.from;
       }
       // A follow-up is asked as typed, with the reminder of how an answer starts (spoken ones have their own).
       const asked = !fresh ? (voice ? text : `[${ANSWER_FIRST}]\n\n${text}`) : note ? notePrompt(text, chat.forked ?? 'none') : sidePrompt(chat.by, text, chat.about, chat.forked ?? 'none');
       const withEvidence = more.extra ? `${asked}\n\n${more.extra}` : asked;
       const prompt = voice ? `${SIDE_VOICE}\n\n${withEvidence}` : withEvidence;
       const src = this.cfg.source();
-      const q = this.deps.query({
-        prompt: once(userMessage(prompt, image)),
-        options: {
-          ...claudeExecutable(),
-          // Claude's folder, unless it has gone since (then home, so the answer still comes).
-          cwd: existsSync(src.cwd) ? src.cwd : homedir(), env: this.cfg.env(), model: chat.model, effort: 'low',
-          tools: SIDE_TOOLS, allowedTools: diagrams ? [...SIDE_ALLOWED, 'mcp__duet__diagram'] : SIDE_ALLOWED, permissionMode: 'dontAsk',
-          ...(diagrams ? { mcpServers: { duet: diagrams } } : {}),
-          settingSources: [], settings: { crossSessionInbound: 'refuse' },
-          includePartialMessages: true, maxTurns: MAX_TURNS, abortController: abort,
-          ...(resume ? { resume } : {}),
-        },
-      });
-      for await (const m of q as AsyncIterable<SDKMessage>) {
-        if (m.type === 'system' && m.subtype === 'init') {
-          chat.sessionId = m.session_id;
-        } else if (m.type === 'stream_event' && m.parent_tool_use_id === null) {
-          const ev = m.event;
-          if (ev.type === 'content_block_delta' && ev.delta.type === 'text_delta') this.post(chat, { type: 'side_delta', chatId: chat.id, text: ev.delta.text });
-        } else if (m.type === 'assistant' && m.parent_tool_use_id === null) {
-          const words = m.message.content.flatMap((b) => (b.type === 'text' ? [b.text] : [])).join('');
-          const call = m.message.content.find((b) => b.type === 'tool_use');
-          if (words.trim()) {
-            // The first answer says which model, how long it took, and why it came to Claude.
+      await this.aside.run({
+        prompt, image, model: chat.model, maxTurns: MAX_TURNS, signal: abort.signal, diagrams,
+        // The lead's folder, unless it has gone since (then home, so the answer still comes).
+        cwd: existsSync(src.cwd) ? src.cwd : homedir(),
+        ...(fresh ? (from ? { from } : {}) : chat.sessionId ? { resume: chat.sessionId } : {}),
+      }, (e) => {
+        if (e.type === 'session') chat.sessionId = e.id;
+        else if (e.type === 'text') this.post(chat, { type: 'side_delta', chatId: chat.id, text: e.delta });
+        else if (e.type === 'error') error = e.message;
+        else if (e.type === 'message') {
+          if (e.text.trim()) {
+            // The first answer says which model, how long it took, and why it came to the agent.
             const meta = first ? { model: chat.model, ...(more.t0 ? { ms: Date.now() - more.t0 } : {}), ...(more.escalated ? { escalated: more.escalated } : {}) } : { model: chat.model };
             first = false;
-            this.post(chat, { type: 'side_message', chatId: chat.id, id: m.message.id ?? `m-${randomUUID().slice(0, 8)}`, role: 'assistant', text: words, ...meta, ...(note ? { fromNote: true } : {}) });
-            said.push({ text: words.trim(), tools: !!call });
+            this.post(chat, { type: 'side_message', chatId: chat.id, id: e.id ?? `m-${randomUUID().slice(0, 8)}`, role: 'assistant', text: e.text, ...meta, ...(note ? { fromNote: true } : {}) });
+            said.push({ text: e.text.trim(), tools: !!e.tool });
           }
-          if (call && call.type === 'tool_use') this.state(chat, 'answering', { activity: activity(call.name, call.input) });
-        } else if (m.type === 'result' && m.subtype !== 'success') {
-          error = m.subtype === 'error_max_turns' ? `Stopped after ${MAX_TURNS} steps; ask it to go on.` : `Claude couldn't answer (${m.subtype}).`;
+          if (e.tool) this.state(chat, 'answering', { activity: activity(e.tool.name, e.tool.input) });
         }
-      }
+      });
     } catch (e) {
       error = abort.signal.aborted ? 'Stopped.' : String(e instanceof Error ? e.message : e).slice(0, 300);
       if (!abort.signal.aborted) this.cfg.log(`side chat ${chat.id} failed: ${error}`);
@@ -444,44 +431,11 @@ export class SideChats {
       const replies = said.filter((s) => !s.tools);
       const answer = (replies.length ? replies : said).map((s) => s.text).join('\n\n');
       if (!error && answer) note.done({ text: answer, diagrams: [...new Set(drawn)] });
-      else note.failed?.(error ?? 'Claude said nothing');
+      else note.failed?.(error ?? `${this.aside.name} said nothing`);
     }
     this.state(chat, error ? 'failed' : 'idle', error ? { error } : {});
   }
 
-  // A copy of the conversation to answer in, up to Claude's last reply: all of it between turns, and everything before
-  // the turn in progress during one (a copy can't start inside a turn). None when there's no conversation yet.
-  private async fork(): Promise<{ sessionId?: string; forked: Forked }> {
-    const src = this.cfg.source();
-    if (!src.sessionId || !src.transcribed) return { forked: 'none' };
-    try {
-      const messages = await this.deps.getSessionMessages(src.sessionId, { dir: src.cwd });
-      const at = lastReply(messages);
-      if (!at) return { forked: 'none' };
-      const { sessionId } = await this.deps.forkSession(src.sessionId, { dir: src.cwd, upToMessageId: at.uuid });
-      return { sessionId, forked: at.last && !src.busy ? 'whole' : 'before_turn' };
-    } catch (e) {
-      this.cfg.log(`side chat: couldn't copy the conversation: ${e}`);
-      return { forked: 'none' };
-    }
-  }
-}
-
-type Message = { type: string; uuid: string; message: unknown; parent_tool_use_id: string | null };
-
-/** The last of Claude's replies that ends a turn (text, no tool call), and whether it's the transcript's last message. */
-export function lastReply(messages: Message[]): { uuid: string; last: boolean } | null {
-  const main = messages.filter((m) => m.parent_tool_use_id === null);
-  for (let i = main.length - 1; i >= 0; i--) {
-    const m = main[i];
-    if (m.type !== 'assistant') continue;
-    const content = (m.message as { content?: unknown })?.content;
-    const blocks = Array.isArray(content) ? (content as { type?: string; text?: string }[]) : [];
-    if (blocks.some((b) => b.type === 'tool_use')) continue;
-    if (!blocks.some((b) => b.type === 'text' && b.text?.trim())) continue;
-    return { uuid: m.uuid, last: i === main.length - 1 };
-  }
-  return null;
 }
 
 /** What a copy of the conversation has seen: all of it, up to the turn in progress, or nothing yet. */
@@ -516,17 +470,6 @@ function clipAbout(a: SideAbout | undefined): SideAbout | undefined {
   if (!a) return undefined;
   if (a.kind === 'text' && a.text && a.text.length > ABOUT_MAX) return { ...a, text: `${a.text.slice(0, ABOUT_MAX)}\n[…]` };
   return a;
-}
-
-function userMessage(text: string, image: SideAsk['image']): SDKUserMessage {
-  const content = image
-    ? [{ type: 'image' as const, source: { type: 'base64' as const, media_type: image.type, data: image.data } }, { type: 'text' as const, text: text || 'About this picture.' }]
-    : text;
-  return { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, session_id: '', origin: { kind: 'human' } } as SDKUserMessage;
-}
-
-async function* once<T>(item: T): AsyncIterable<T> {
-  yield item;
 }
 
 /** "Read src/fleet.ts", for the side chat's status line. */

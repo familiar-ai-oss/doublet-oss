@@ -1,6 +1,5 @@
-// Coding agents on the hub's machine, for Settings → Agents: Claude Code, Codex CLI, Cursor CLI, Antigravity CLI and
-// Gemini CLI. For each, where it is, its version, and whether it's ready (installed and signed in), needs signing in,
-// isn't installed, or is signed in a way its terms don't let an app like Doublet use (blocked).
+// Coding agents on the hub's machine, for Settings → Agents: Claude Code, Codex CLI and Cursor CLI. For each, where it
+// is, its version, and whether it's ready (installed and signed in), needs signing in, or isn't installed.
 //
 // Finding one: the same search as the hub's own `claude` (claude.ts: PATH, then ~/.local/bin and ~/.claude/local), plus
 // the places npm, Homebrew and the CLIs' own installers put things, since a service's PATH often leaves those out.
@@ -42,9 +41,8 @@ export function defaultScanEnv(): ScanEnv {
   return { env: process.env, home: homedir(), platform: process.platform, run: runCommand, host: hostname() };
 }
 
-/** A sign-in check: whether it found one, and what it looked for (shown when it didn't). `blocked`: signed in, but only
- *  in a way its terms don't allow an app like Doublet to use; the text says what would work instead. */
-type SignIn = { found: boolean; checked: string; blocked?: string };
+/** A sign-in check: whether it found one, and what it looked for (shown when it didn't). */
+type SignIn = { found: boolean; checked: string };
 
 type AgentSpec = {
   id: AgentId;
@@ -124,12 +122,6 @@ export function findCursor(s: ScanEnv): string | null {
   return findIn('cursor-agent', dirs);
 }
 
-const AGY_SETTINGS = '.gemini/antigravity-cli/settings.json';
-const AGY_BLOCKED = 'Signed in with a Google account: Antigravity\'s terms don\'t allow apps like Doublet to use a personal ' +
-  'Google AI plan. Set GEMINI_API_KEY for the hub and "modelProvider": "gemini" in ~/' + AGY_SETTINGS + ', or use Gemini Enterprise.';
-const GEMINI_BLOCKED = 'Gemini CLI no longer works with personal Google sign-ins (since June 2026). Set GEMINI_API_KEY for the ' +
-  'hub, or use Vertex AI or Gemini Code Assist Standard or Enterprise.';
-
 export const AGENTS: readonly AgentSpec[] = [
   {
     id: 'claude', name: 'Claude Code', command: 'claude',
@@ -175,37 +167,6 @@ export const AGENTS: readonly AgentSpec[] = [
       return { found: await inKeychain(s, 'cursor-access-token'), checked };
     },
   },
-  {
-    id: 'agy', name: 'Antigravity CLI', command: 'agy',
-    find: (s) => findIn('agy', agentDirs(s.env, s.home)),
-    howToSignIn: 'Set GEMINI_API_KEY for the hub and "modelProvider": "gemini" in ~/' + AGY_SETTINGS + ' (or use Gemini Enterprise).',
-    // agy has no status command. Doublet may use it only with a Gemini API key (modelProvider "gemini" plus the key in the
-    // environment) or an enterprise sign-in through Application Default Credentials (AGY_ADC_AUTH). A personal Google
-    // sign-in lives in the keyring, which can't be checked without asking it; any other installed agy is taken to be one.
-    signIn: async (s) => {
-      const checked = 'GEMINI_API_KEY with modelProvider "gemini" in ~/' + AGY_SETTINGS + ', or AGY_ADC_AUTH';
-      const provider = readJson(file(s, AGY_SETTINGS))?.modelProvider;
-      if ((provider === 'gemini' && hasEnv(s, 'GEMINI_API_KEY')) || hasEnv(s, 'AGY_ADC_AUTH')) return { found: true, checked };
-      return { found: false, checked, blocked: AGY_BLOCKED };
-    },
-  },
-  {
-    id: 'gemini', name: 'Gemini CLI', command: 'gemini',
-    find: (s) => findIn('gemini', agentDirs(s.env, s.home)),
-    howToSignIn: 'Run `gemini` on this machine and choose a sign-in (or set GEMINI_API_KEY).',
-    // An API key or Vertex in the environment, the Google sign-in it caches (~/.gemini/oauth_creds.json), or an auth
-    // type chosen in its settings (which means it was set up, though a key it names may still be missing).
-    signIn: async (s) => {
-      const checked = 'GEMINI_API_KEY / GOOGLE_API_KEY / GOOGLE_GENAI_USE_VERTEXAI, ~/.gemini/oauth_creds.json, ~/.gemini/settings.json auth type';
-      if (hasEnv(s, 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'GOOGLE_GENAI_USE_VERTEXAI')) return { found: true, checked };
-      const settings = readJson(file(s, '.gemini/settings.json'));
-      const auth = settings?.selectedAuthType ?? (settings?.security as { auth?: { selectedType?: unknown } } | undefined)?.auth?.selectedType;
-      // A personal Google sign-in (oauth-personal, its cached oauth_creds.json) no longer works; Vertex or Code Assist do.
-      const personal = auth === 'oauth-personal' || (auth === undefined && existsSync(file(s, '.gemini/oauth_creds.json')));
-      if (personal) return { found: false, checked, blocked: GEMINI_BLOCKED };
-      return { found: typeof auth === 'string' && auth !== '', checked };
-    },
-  },
 ];
 
 /** The first version number in a CLI's `--version` output ("codex-cli 0.47.0" → "0.47.0"). */
@@ -226,14 +187,13 @@ export async function scanAgent(spec: AgentSpec, s: ScanEnv): Promise<AgentInfo>
     s.run(path, ['--version'], 5000), spec.signIn(s), spec.status ? spec.status(path, s) : Promise.resolve(null),
   ]);
   const version = ran.ok ? versionIn(ran.out) : undefined;
-  // Its own status command wins; the file guess only when it doesn't say. A blocked sign-in is never ready.
-  const found = told ?? guess.found;
-  const state: AgentInfo['state'] = found ? 'ready' : guess.blocked ? 'blocked' : 'needs_sign_in';
+  // Its own status command wins; the file guess only when it doesn't say.
+  const state: AgentInfo['state'] = told ?? guess.found ? 'ready' : 'needs_sign_in';
   const checked = told === null ? guess.checked : `\`${base.command} ${spec.id === 'claude' ? 'auth status' : spec.id === 'codex' ? 'login status' : 'status'}\``;
   return {
     ...base, path, ...(version ? { version } : {}),
     state,
-    ...(state === 'blocked' ? { signIn: guess.blocked } : state === 'needs_sign_in' ? { signIn: `${spec.howToSignIn.replaceAll(`\`${spec.command} `, `\`${base.command} `)} (Looked for: ${checked}.)` } : {}),
+    ...(state === 'needs_sign_in' ? { signIn: `${spec.howToSignIn.replaceAll(`\`${spec.command} `, `\`${base.command} `)} (Looked for: ${checked}.)` } : {}),
     ...(ran.ok ? {} : { problem: `\`${base.command} --version\` failed (${ran.out.trim().split('\n')[0].slice(0, 200) || 'no output'}): it may not run. Reinstall it?` }),
   };
 }

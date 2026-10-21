@@ -37,7 +37,8 @@ import { EndpointStore } from './endpoints.ts';
 import { isSettingsMsg, Settings } from './settings.ts';
 import { McpGateway } from './agents/mcp-gateway.ts';
 import { CodexAdapter } from './agents/codex.ts';
-import { AcpAdapter, CURSOR_ACP, GEMINI_ACP } from './agents/acp.ts';
+import { AcpAdapter, CURSOR_ACP } from './agents/acp.ts';
+import { AcpAside, CodexAside } from './agents/aside.ts';
 
 const env = process.env;
 const cfg = {
@@ -175,9 +176,9 @@ events.subscribe(events.headSeq, (e) => annotations.onEvent(e));
 // DUET_MCP_TRANSPORT=http or stdio: Claude reaches Doublet's tools through the gateway other agents use, instead of
 // in-process (to check both give it the same tools). Unset: in-process.
 const mcpTransport = process.env.DUET_MCP_TRANSPORT === 'http' || process.env.DUET_MCP_TRANSPORT === 'stdio' ? process.env.DUET_MCP_TRANSPORT : null;
-// DUET_LEAD_AGENT=codex, cursor or gemini: that agent leads instead of Claude Code (until the app picks the lead per
+// DUET_LEAD_AGENT=codex or cursor: that agent leads instead of Claude Code (until the app picks the lead per
 // conversation), with Doublet's tools through the gateway. DUET_LEAD_MODEL is then one of its models.
-const LEAD_AGENTS = ['claude', 'codex', 'cursor', 'gemini'] as const;
+const LEAD_AGENTS = ['claude', 'codex', 'cursor'] as const;
 const leadAgent = (LEAD_AGENTS as readonly string[]).includes(process.env.DUET_LEAD_AGENT ?? '') ? process.env.DUET_LEAD_AGENT as typeof LEAD_AGENTS[number] : 'claude';
 const mcpGateway = mcpTransport || leadAgent !== 'claude' ? new McpGateway(log) : null;
 if (mcpGateway) log(`Doublet's tools for the ${leadAgent} lead: over ${mcpTransport ?? 'http'}, gateway on 127.0.0.1:${await mcpGateway.listen()}`);
@@ -196,7 +197,7 @@ const lead = new Lead(
     ...(mcpGateway && mcpTransport ? { mcpGateway: { gateway: mcpGateway, transport: mcpTransport } } : {}),
     ...(leadAgent !== 'claude' && mcpGateway ? (() => {
       const extras = { mcpServers: () => ({ duet: dialogue.leadServer() }), gateway: mcpGateway, instructions: () => leadGuidance(dialogue.appleForLead) };
-      return { adapter: leadAgent === 'codex' ? new CodexAdapter(extras) : new AcpAdapter(leadAgent === 'cursor' ? CURSOR_ACP : GEMINI_ACP, extras) };
+      return { adapter: leadAgent === 'codex' ? new CodexAdapter(extras) : new AcpAdapter(CURSOR_ACP, extras) };
     })() : {}),
     onTurnStart: () => dialogue.onLeadTurnStart(),
     onIdle: () => { dialogue.onLeadIdle(); void continueWaiting(); },
@@ -264,8 +265,25 @@ const questions = new NoteQuestions({
 });
 
 // Side chats: quick questions beside the conversation, answered in a copy of it (read-only), or by a local model.
+/** The live conversation as text, for an agent that can't copy it (an ACP agent's side chats): its last prompts and
+ *  replies, newest last, at most 30,000 characters. */
+function transcript(): string {
+  const id = lead.conversationId;
+  const lines = events.since(0).flatMap((e) => {
+    if (e.conversationId !== id) return [];
+    if (e.type === 'user' && e.text) return [`User: ${e.text}`];
+    if (e.type === 'assistant' && e.text.trim()) return [`You: ${e.text.trim()}`];
+    return [];
+  });
+  return lines.slice(-80).join('\n\n').slice(-30_000);
+}
+// Side chats and notes' answers come from the lead's own agent.
+const aside = leadAgent === 'codex' ? new CodexAside({ model: () => cfg.model, gateway: mcpGateway ?? undefined, log })
+  : leadAgent === 'cursor' ? new AcpAside(CURSOR_ACP, { model: () => cfg.model, readOnlyMode: 'ask', gateway: mcpGateway ?? undefined, log })
+  : undefined;
 const sides = new SideChats({
-  source: () => ({ sessionId: lead.conversationId, transcribed: lead.transcribed, busy: lead.busyNow, cwd: lead.cwd }), env: leadEnv, log,
+  source: () => ({ sessionId: lead.conversationId, transcribed: lead.transcribed, busy: lead.busyNow, cwd: lead.cwd, transcript }), env: leadEnv, log,
+  ...(aside ? { aside } : {}),
   local: {
     ask: (prompt, size, by, onTask) => askLocal(prompt, size, by, onTask),
     free: (size) => fleet.idleLocal().some((w) => size === 'small' || w.takes === 'any'),

@@ -45,6 +45,24 @@ test('a reply streams in and the turn ends', async () => {
   assert.match(said(turn), /pong/i);
 });
 
+test("a side chat is answered by the lead's agent: it knows the conversation, adds nothing to it, and continues", async () => {
+  const settled = (chatId: string, from: number) => next('side_chat', (e) => e.chatId === chatId && e.state !== 'answering', from, 240_000);
+  const answers = (chatId: string) => events.filter((e): e is Ev<'side_message'> => e.type === 'side_message' && e.chatId === chatId && e.role === 'assistant').map((m) => m.text);
+  const prompts = events.filter((e) => e.type === 'user').length;
+  let from = events.length;
+  const chatId = (await client.send({ type: 'side_ask', text: 'Which single word did I first ask you to reply with? Answer with the word only.' })).chatId!;
+  const done = await settled(chatId, from);
+  assert.equal(done.state, 'idle', done.error);
+  assert.equal(done.forked, 'whole');
+  assert.match(answers(chatId).join('\n'), /pong/i, 'it knows the conversation');
+  assert.equal(events.filter((e) => e.type === 'user').length, prompts, 'the conversation itself got no new turn');
+  from = events.length;
+  await client.send({ type: 'side_ask', chatId, text: 'Say that word again, in capital letters, and nothing else.' });
+  const again = await settled(chatId, from);
+  assert.equal(again.state, 'idle', again.error);
+  assert.match(answers(chatId).at(-1) ?? '', /PONG/, 'the follow-up continues the same aside');
+});
+
 test('a command waits for approval, and runs once approved', async () => {
   const turn = await prompt(`Run this exact shell command in ${projectDir} and nothing else: echo doublet-ok > ok.txt`);
   const req = await next('approval_request', (e) => e.turn === turn, 0, 120_000);
@@ -91,6 +109,27 @@ test('Stop interrupts a turn, and the next prompt works', async () => {
   const again = await prompt('Reply with exactly the word: again');
   await turnEnd(again);
   assert.match(said(again), /again/i);
+});
+
+test('plan mode: the plan comes on the plan card, and approving it leaves plan mode and does the work', async () => {
+  await client.send({ type: 'set_permission_mode', mode: 'plan' });
+  await next('lead_info', (e) => e.permissionMode === 'plan', 0, 30_000);
+  const turn = await prompt(`Plan how to create ${join(projectDir, 'planned.txt')} containing the single word: planned. Don't create it yet; present your plan for my approval.`);
+  const card = await next('approval_request', (e) => e.tool === 'ExitPlanMode', 0, 240_000);
+  assert.ok(typeof card.plan === 'string' && card.plan.length > 0, 'the plan is on the card');
+  assert.equal(existsSync(join(projectDir, 'planned.txt')), false, 'nothing changes while planning');
+  const from = events.length;
+  await client.send({ type: 'approve', id: card.id });
+  await next('lead_info', (e) => e.permissionMode === 'default', from, 60_000);
+  // The work starts by itself; any command it runs still asks.
+  const deadline = Date.now() + 240_000;
+  while (!existsSync(join(projectDir, 'planned.txt')) && Date.now() < deadline) {
+    const ask = events.slice(from).find((e): e is Ev<'approval_request'> => e.type === 'approval_request' && e.tool !== 'ExitPlanMode' && !events.some((x) => x.type === 'approval_resolved' && x.id === e.id));
+    if (ask) await client.send({ type: 'approve', id: ask.id });
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  void turn;
+  assert.equal(readFileSync(join(projectDir, 'planned.txt'), 'utf8').trim(), 'planned');
 });
 
 test('after a hub restart, Cursor loads the same session and remembers it', async () => {

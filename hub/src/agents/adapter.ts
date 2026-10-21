@@ -105,12 +105,18 @@ export interface AgentSession {
   setModel(model: string): Promise<void>;
   setMode(mode: PermissionMode): Promise<void>;
   setEffort(level: EffortLevel | null): Promise<void>;
+  /** Summarizes the conversation to free its context, if the agent can on request (Claude Code takes `/compact` as a
+   *  prompt instead; ACP has no such request). */
+  compact?(): Promise<void>;
   /** A turn ended: drop what the agent cut off with it (subagents it waited on). */
   endTurn(): void;
   /** Its process is gone: drop whatever ran in it. */
   release(): void;
   close(): void;
 }
+
+/** The reason the hub gives a rejection without a note: nothing more to tell the agent. */
+export const REJECTED = 'The user rejected this tool call.';
 
 /** A session that won't start, and why (shown to the user as is). */
 export class Refused extends Error {}

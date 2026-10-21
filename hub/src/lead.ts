@@ -6,7 +6,7 @@ import { randomUUID } from 'node:crypto';
 import { existsSync, statSync } from 'node:fs';
 import { PERMISSION_MODES, type EffortLevel, type EventBody, type HubEvent, type Notes, type PermissionMode, type ToolCall } from './protocol.ts';
 import type { StateFile } from './store.ts';
-import { Refused, type AgentAdapter, type AgentEvent, type AgentSession, type ApprovalAnswer, type Image, type SessionHost, type SessionOptions } from './agents/adapter.ts';
+import { REJECTED, Refused, type AgentAdapter, type AgentEvent, type AgentSession, type ApprovalAnswer, type Image, type SessionHost, type SessionOptions } from './agents/adapter.ts';
 import { ClaudeAdapter, type ClaudeExtras } from './agents/claude.ts';
 
 export type { Image } from './agents/adapter.ts';
@@ -455,10 +455,20 @@ export class Lead {
     for (const q of this.pushed.splice(0)) if (q.held) this.emit({ type: 'queued', id: q.held, state: 'taken' });
   }
 
-  // /compact runs as a normal turn; the compact_boundary message reports the token counts.
+  // Claude Code runs /compact as a normal turn, and its compact_boundary message reports the token counts. An agent
+  // with its own compaction (Codex) is asked for it; one with none (ACP agents) says so.
   compact(by: string): void {
     this.compactBy = by;
-    this.submit('/compact', by);
+    if (this.adapter.id === 'claude') return this.submit('/compact', by);
+    if (!this.session?.compact) {
+      this.compactBy = null;
+      this.emit({ type: 'error', message: `${this.adapter.name} can't compact on request; it summarizes by itself when its context fills.` });
+      return;
+    }
+    this.session.compact().catch((e) => {
+      this.compactBy = null;
+      this.emit({ type: 'error', message: `${this.adapter.name} didn't compact: ${e instanceof Error ? e.message : e}` });
+    });
   }
 
   // Clear starts a new conversation: same tools and settings, no history. The old one stays resumable.
@@ -635,7 +645,7 @@ export class Lead {
     const note = message?.trim() || undefined;
     const reason = p.tool === EXIT_PLAN
       ? `The user wants you to keep planning${note ? `: ${note}` : ", and didn't say what to change. Ask them."}`
-      : note ?? 'The user rejected this tool call.';
+      : note ?? REJECTED;
     this.settle(id, { allow: false, message: reason }, 'deny', false, by, note);
   }
 

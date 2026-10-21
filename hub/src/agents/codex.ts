@@ -16,23 +16,27 @@ import { findIn } from '../claude.ts';
 import { baseEnv } from '../lead.ts';
 import { EFFORT_LEVELS, type EffortLevel, type LeadModel, type PermissionMode, type ToolUse } from '../protocol.ts';
 import { McpGateway } from './mcp-gateway.ts';
-import { Refused, type AgentAdapter, type AgentCaps, type AgentSession, type Image, type SessionHost, type SessionOptions } from './adapter.ts';
+import { REJECTED, Refused, type AgentAdapter, type AgentCaps, type AgentSession, type Image, type SessionHost, type SessionOptions } from './adapter.ts';
 
 /** The app-server version this adapter was written and tested against. */
 export const TESTED_CODEX = '0.156.1';
 
 export const CODEX_CAPS: AgentCaps = {
-  steerMidTurn: true, subagents: false, resume: true, fork: true, liveModelSwitch: true, effort: true,
+  steerMidTurn: true, subagents: true, resume: true, fork: true, liveModelSwitch: true, effort: true,
   approvals: 'callback', promptContext: false, cost: false,
 };
+
+/** Codex's plan mode, its questions and its plan come through the experimental API (collaborationMode on turn/start),
+ *  as in Codex's own app. */
+const EXPERIMENTAL = true;
 
 /** The `codex` to run: DUET_CODEX_PATH, else the first on PATH or where its installers put it. */
 export function codexPath(env: NodeJS.ProcessEnv = process.env, home = homedir()): string | null {
   return env.DUET_CODEX_PATH || findIn('codex', agentDirs(env, home));
 }
 
-/** Doublet's permission modes as Codex's approval policy and sandbox. Codex has no plan mode of its own: plan is
- *  read-only, asking first. */
+/** Doublet's permission modes as Codex's approval policy and sandbox. Plan mode is also Codex's own plan collaboration
+ *  mode (turn/start's collaborationMode), read-only and asking first. */
 export function codexPolicy(mode: PermissionMode, cwd: string): { approvalPolicy: string; sandbox: string; sandboxPolicy: Record<string, unknown> } {
   const write = { type: 'workspaceWrite', writableRoots: [cwd], networkAccess: false, excludeTmpdirEnvVar: false, excludeSlashTmp: false };
   switch (mode) {
@@ -141,7 +145,7 @@ export class CodexSession implements AgentSession {
       this.calls.clear();
     });
 
-    await this.call('initialize', { clientInfo: { name: 'doublet', title: 'Doublet', version: '0.1.0' }, capabilities: { experimentalApi: false, requestAttestation: false } });
+    await this.call('initialize', { clientInfo: { name: 'doublet', title: 'Doublet', version: '0.1.0' }, capabilities: { experimentalApi: EXPERIMENTAL, requestAttestation: false } });
     this.notify('initialized', {});
 
     const policy = codexPolicy(this.mode, this.opts.cwd);
@@ -241,15 +245,20 @@ export class CodexSession implements AgentSession {
         const t = p.turn as { id: string; status: string; error: { message: string } | null; durationMs: number | null };
         if (t.id === this.turnId) this.turnId = null;
         if (t.error) this.host.log(`codex turn ${t.id} ${t.status}: ${t.error.message}`);
-        return ev({
+        ev({
           type: 'turn_end', subtype: t.status === 'completed' ? 'success' : t.status === 'interrupted' ? 'interrupted' : 'error_during_execution',
           isError: t.status === 'failed', durationMs: t.durationMs ?? undefined, numTurns: 1,
         });
+        const next = this.afterTurn.shift();
+        if (next) void this.deliver(next).catch((e) => this.host.log(`codex didn't take a message: ${e}`));
+        return;
       }
       case 'thread/status/changed':
         if (p.status?.type === 'idle') ev({ type: 'idle' });
         return;
       case 'thread/compacted':
+        // Older versions say so here; newer ones with a contextCompaction item (itemCompleted). Counted once.
+        if (this.compacted) return void (this.compacted = false);
         return ev({ type: 'compacted', preTokens: 0 });
       case 'error':
         if (!p.willRetry) this.host.log(`codex error: ${p.error?.message}`);
@@ -257,8 +266,38 @@ export class CodexSession implements AgentSession {
     }
   }
 
+  /** Codex's own subagents (collab agents), by their thread: shown as workers, as Claude's are. */
+  private agents = new Set<string>();
+
+  private collab(item: Item): void {
+    if (item.type === 'subAgentActivity') {
+      if (item.kind === 'started') this.agentStarted(item.agentThreadId, item.agentPath || 'codex agent', '');
+      if (item.kind === 'completed' || item.kind === 'interrupted') this.agentEnded(item.agentThreadId, item.kind === 'completed' ? 'done' : 'cancelled', '');
+      return;
+    }
+    if (item.type !== 'collabAgentToolCall') return;
+    if (item.tool === 'spawnAgent') for (const id of item.receiverThreadIds ?? []) this.agentStarted(id, item.model || 'codex agent', item.prompt ?? '');
+    for (const [id, st] of Object.entries((item.agentsStates ?? {}) as Record<string, { status: string; message: string | null }>)) {
+      const end = st.status === 'completed' ? 'done' : st.status === 'errored' || st.status === 'notFound' ? 'failed' : st.status === 'interrupted' || st.status === 'shutdown' ? 'cancelled' : null;
+      if (end) this.agentEnded(id, end, st.message ?? '');
+    }
+  }
+
+  private agentStarted(id: string, kind: string, prompt: string): void {
+    if (!id || this.agents.has(id)) return;
+    this.agents.add(id);
+    const label = prompt.split('\n').find((l) => l.trim())?.trim().slice(0, 80);
+    this.host.subagents?.start(id, kind, prompt, label ? { label } : {});
+  }
+
+  private agentEnded(id: string, state: 'done' | 'failed' | 'cancelled', report: string): void {
+    if (!this.agents.delete(id)) return;
+    this.host.subagents?.end(id, state, report);
+  }
+
   private itemStarted(item: Item): void {
     this.items.set(item.id, item);
+    this.collab(item);
     const use = toolUse(item);
     if (!use) return;
     this.host.event({ type: 'activity' });
@@ -267,12 +306,24 @@ export class CodexSession implements AgentSession {
 
   private itemCompleted(item: Item): void {
     this.items.delete(item.id);
+    this.collab(item);
     if (item.type === 'agentMessage') {
       const text = item.text || this.said.get(item.id) || '';
       this.said.delete(item.id);
-      if (!text) return;
-      this.host.event({ type: 'activity' });
-      return this.host.event({ type: 'message', text, toolUses: [] });
+      if (text) {
+        this.host.event({ type: 'activity' });
+        this.host.event({ type: 'message', text, toolUses: [] });
+      }
+      // Questions it asks you (in plan mode): the question card. Codex doesn't wait for them; your answers go to it as
+      // your next message.
+      if (Array.isArray(item.questions) && item.questions.length) this.questions(item.id, item.questions);
+      return;
+    }
+    // Its plan, in plan mode: the plan's approval card, as Claude's ExitPlanMode.
+    if (item.type === 'plan' && item.text) return this.planReady(item.id, item.text);
+    if (item.type === 'contextCompaction') {
+      this.compacted = true;
+      return this.host.event({ type: 'compacted', preTokens: 0 });
     }
     const out = toolOutput(item);
     if (!out) return;
@@ -288,34 +339,103 @@ export class CodexSession implements AgentSession {
     const answer = (result: unknown) => this.write({ id, result });
     switch (method) {
       case 'item/commandExecution/requestApproval':
-        return this.approve(id, 'Bash', { command: p.command ?? '', ...(p.cwd ? { cwd: p.cwd } : {}) }, p.itemId, p.reason);
+        return this.approve(id, 'Bash', { command: p.command ?? '', ...(p.cwd ? { cwd: p.cwd } : {}) }, p.itemId, p.reason, p.availableDecisions);
       case 'item/fileChange/requestApproval': {
         const item = this.items.get(p.itemId);
-        return this.approve(id, 'Edit', { changes: (item?.changes ?? []).map((c: { path: string; kind: unknown; diff: string }) => ({ path: c.path, kind: c.kind, diff: c.diff })) }, p.itemId, p.reason);
+        return this.approve(id, 'Edit', { changes: (item?.changes ?? []).map((c: { path: string; kind: unknown; diff: string }) => ({ path: c.path, kind: c.kind, diff: c.diff })) }, p.itemId, p.reason, p.availableDecisions);
       }
       case 'mcpServer/elicitation/request':
         return answer({ action: 'decline', content: null, _meta: null });
-      case 'item/tool/requestUserInput':
-        return answer({ answers: {} });
+      case 'item/tool/requestUserInput': {
+        // Questions it waits on: the question card, answered by option label (or your own words for "other").
+        const qs = (p.questions ?? []) as { id: string; header: string; question: string; options: { label: string; description: string }[] | null }[];
+        return this.ask(qs.map((q) => ({ question: q.question, header: q.header, options: (q.options ?? []).map((o) => ({ label: o.label, description: o.description })), multiSelect: false })), p.itemId, (answers) => {
+          answer({ answers: Object.fromEntries(qs.map((q) => [q.id, { answers: answers?.[q.question] ? [answers[q.question]] : [] }])) });
+        });
+      }
       default:
         this.host.log(`codex asked ${method}, which Doublet doesn't handle: declined`);
         return this.write({ id, error: { code: -32601, message: `Doublet doesn't handle ${method}` } });
     }
   }
 
-  private approve(id: number | string, tool: string, input: Record<string, unknown>, itemId: string, reason?: string | null): void {
+  /** A call that needs an OK: the approval card. Codex can't run an edited call, so an edit refuses this one and tells
+   *  Codex what you want run instead. Its request lists the decisions it takes (not always decline). */
+  private approve(id: number | string, tool: string, input: Record<string, unknown>, itemId: string, reason?: string | null, decisions?: unknown[]): void {
     let done = false;
+    const can = (d: string) => !decisions || decisions.includes(d);
+    const refuse = can('decline') ? 'decline' : 'cancel';
     this.host.event({
       type: 'approval', tool, input, toolUseId: itemId, ...(reason ? { description: reason } : {}),
-      // Codex can't run an edited call: an edit is taken as an OK of the call as it was (the card says what ran).
       respond: (a) => {
         if (done) return;
         done = true;
-        this.write({ id, result: { decision: a.allow ? 'accept' : a.interrupt ? 'cancel' : 'decline' } });
+        if (a.allow) {
+          const command = a.input.command;
+          if (tool !== 'Bash' || typeof command !== 'string' || command === input.command) return this.write({ id, result: { decision: 'accept' } });
+          this.write({ id, result: { decision: refuse } });
+          return this.tell(`[duet] The user edited that command before approving it. Run this instead: ${command}`);
+        }
+        this.write({ id, result: { decision: a.interrupt ? 'cancel' : refuse } });
+        if (!a.interrupt && a.message && a.message !== REJECTED) this.tell(`[duet] The user rejected that call: ${a.message}`);
       },
       onWithdrawn: () => {},
     });
   }
+
+  /** Questions for you: the question card (as Claude's AskUserQuestion). `then` gets your answers, question → choice,
+   *  or null if you didn't answer. */
+  private ask(questions: { question: string; header?: string; options: { label: string; description?: string }[]; multiSelect: boolean }[], itemId: string, then: (answers: Record<string, string> | null) => void): void {
+    let done = false;
+    this.host.event({
+      type: 'approval', tool: 'AskUserQuestion', input: { questions }, toolUseId: itemId,
+      respond: (a) => {
+        if (done) return;
+        done = true;
+        then(a.allow ? ((a.input.answers ?? {}) as Record<string, string>) : null);
+      },
+      onWithdrawn: () => {},
+    });
+  }
+
+  /** Questions in a message (plan mode), which Codex doesn't wait on: your answers go to it as your next message. */
+  private questions(itemId: string, qs: { title: string; options?: string[] }[]): void {
+    this.ask(qs.map((q) => ({ question: q.title, options: (q.options ?? []).map((label) => ({ label })), multiSelect: false })), itemId, (answers) => {
+      if (!answers) return this.tell("[duet] The user didn't answer your question; go on with your best judgment, and say what you assumed.");
+      this.tell(`[duet] The user's answers:\n${qs.map((q) => `- ${q.title} ${answers[q.title] ?? '(no answer)'}`).join('\n')}`);
+    });
+  }
+
+  /** Its plan, in plan mode: the plan's approval card. Approving leaves plan mode and starts the work (an edited plan
+   *  goes with it); rejecting keeps it planning, with your note. */
+  private planReady(itemId: string, plan: string): void {
+    let done = false;
+    this.host.event({
+      type: 'approval', tool: 'ExitPlanMode', input: { plan }, toolUseId: itemId,
+      respond: (a) => {
+        if (done) return;
+        done = true;
+        if (!a.allow) return this.tell(a.message);
+        const edited = typeof a.input.plan === 'string' && a.input.plan !== plan ? a.input.plan : null;
+        this.mode = 'default';
+        this.host.event({ type: 'mode', mode: 'default' });
+        // A turn of its own, out of plan mode: steering the planning turn would keep it read-only.
+        this.tell(edited ? `[duet] The user approved your plan, with their edits. Implement this plan now:\n\n${edited}` : '[duet] The user approved your plan. Implement it now.', true);
+      },
+      onWithdrawn: () => {},
+    });
+  }
+
+  /** Something the hub tells Codex itself: into the running turn, or as a turn of its own (`own`: always its own turn,
+   *  after the running one ends, so it runs with the mode as it is now). */
+  private tell(text: string, own = false): void {
+    const input = [{ type: 'text', text, text_elements: [] }];
+    if (own && this.turnId) return void this.afterTurn.push(input);
+    void this.deliver(input).catch((e) => this.host.log(`codex didn't take a message: ${e}`));
+  }
+
+  /** Turns to start once the running one ends. */
+  private afterTurn: unknown[][] = [];
 
   // ---- what the hub asks ----
 
@@ -340,11 +460,18 @@ export class CodexSession implements AgentSession {
       }
     }
     const policy = codexPolicy(this.mode, this.opts.cwd);
+    const settings = { model: this.model, reasoning_effort: this.effort ?? null, developer_instructions: null };
     const r = await this.call('turn/start', {
       threadId: this.threadId, input, model: this.model, ...(this.effort ? { effort: this.effort } : {}),
       approvalPolicy: policy.approvalPolicy, sandboxPolicy: policy.sandboxPolicy,
+      ...(EXPERIMENTAL ? { collaborationMode: { mode: this.mode === 'plan' ? 'plan' : 'default', settings } } : {}),
     });
     this.turnId ??= r.turn?.id ?? null;
+  }
+
+  /** Summarizes the thread to free its context (`thread/compacted` says when it's done). */
+  async compact(): Promise<void> {
+    await this.call('thread/compact/start', { threadId: this.threadId });
   }
 
   async interrupt(): Promise<void> {
@@ -373,10 +500,14 @@ export class CodexSession implements AgentSession {
   endTurn(): void {}
 
   release(): void {
+    if (this.agents.size) this.host.subagents?.stopped(true);
+    this.agents.clear();
     for (const t of this.tokens.splice(0)) this.extras.gateway?.unregister(t);
   }
 
   private closing = false;
+  /** A contextCompaction item said it compacted: a thread/compacted after it is the same one. */
+  private compacted = false;
   close(): void {
     this.closing = true;
     this.proc?.stdin.end();

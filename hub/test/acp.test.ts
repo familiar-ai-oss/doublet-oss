@@ -74,7 +74,9 @@ test('permissions: a card for anything that changes things, none for reads or Do
   rm.respond({ allow: true, input: rm.input });
   touch.respond({ allow: false, message: 'no' });
   edit.respond({ allow: false, message: 'Interrupted', interrupt: true });
-  assert.deepEqual(written.slice(2).map((w) => [w.id, w.result.outcome]), [[3, { outcome: 'selected', optionId: 'allow-once' }], [4, { outcome: 'selected', optionId: 'reject-once' }], [5, { outcome: 'cancelled' }]]);
+  assert.deepEqual(written.slice(2).filter((w) => w.result).map((w) => [w.id, w.result.outcome]), [[3, { outcome: 'selected', optionId: 'allow-once' }], [4, { outcome: 'selected', optionId: 'reject-once' }], [5, { outcome: 'cancelled' }]]);
+  // A rejection with a note: the agent hears the note as the next prompt.
+  assert.match(written.find((w) => w.method === 'session/prompt')?.params.prompt[0].text ?? '', /rejected that call: no/);
 
   const bypass = setup('bypassPermissions');
   bypass.session.handle({ jsonrpc: '2.0', id: 9, method: 'session/request_permission', params: { toolCall: { toolCallId: 'q', kind: 'execute' }, options: OPTIONS } });
@@ -82,7 +84,7 @@ test('permissions: a card for anything that changes things, none for reads or Do
   assert.equal(bypass.of('approval').length, 0);
 
   written.length = 0;
-  session.handle({ jsonrpc: '2.0', id: 10, method: 'cursor/ask_question', params: {} });
+  session.handle({ jsonrpc: '2.0', id: 10, method: 'cursor/generate_image', params: {} });
   assert.equal(written[0].error.code, -32601, 'answered, so the agent never waits for ever');
 });
 
@@ -97,4 +99,40 @@ test('what session/load replays is not shown again; Doublet\'s plan mode is Curs
   session['mode'] = 'plan';
   update({ sessionUpdate: 'current_mode_update', currentModeId: 'agent' });
   assert.deepEqual(events.at(-1), { type: 'mode', mode: 'default' }, 'leaving plan mode is followed');
+});
+
+test("Cursor's plan and questions use Claude's cards; approving the plan leaves plan mode and starts the work", async () => {
+  const { session, written, of } = setup();
+  session['mode'] = 'plan';
+  session.handle({ jsonrpc: '2.0', id: 0, method: 'cursor/create_plan', params: { toolCallId: 'p1', name: 'Add README', overview: 'A short README.', plan: '# Add README\n- write it', todos: [], isProject: false, phases: [] } });
+  const plan = of('approval')[0];
+  assert.deepEqual([plan.tool, plan.input.plan], ['ExitPlanMode', '# Add README\n- write it']);
+  plan.respond({ allow: true, input: plan.input });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(written[0], { jsonrpc: '2.0', id: 0, result: { outcome: { outcome: 'accepted' } } });
+  assert.deepEqual(of('mode').at(-1), { type: 'mode', mode: 'default' });
+  assert.ok(written.some((w) => w.method === 'session/set_mode' && w.params.modeId === 'agent'), 'Cursor leaves plan mode');
+  assert.ok(written.some((w) => w.method === 'session/prompt' && /approved your plan/.test(w.params.prompt[0].text)), 'and starts the work');
+
+  session.handle({ jsonrpc: '2.0', id: 1, method: 'cursor/create_plan', params: { toolCallId: 'p2', plan: '# Again' } });
+  of('approval')[1].respond({ allow: false, message: 'The user wants you to keep planning: smaller' });
+  assert.deepEqual(written.find((w) => w.id === 1 && w.result)?.result, { outcome: { outcome: 'rejected', reason: 'The user wants you to keep planning: smaller' } });
+
+  session.handle({ jsonrpc: '2.0', id: 2, method: 'cursor/ask_question', params: { toolCallId: 'q1', title: 'Tone', questions: [{ id: 'tone', prompt: 'Which tone?', options: [{ id: 'f', label: 'Friendly' }, { id: 'p', label: 'Professional' }], allowMultiple: false }] } });
+  const q = of('approval')[2];
+  assert.deepEqual(q.input, { questions: [{ question: 'Which tone?', header: 'Tone', options: [{ label: 'Friendly' }, { label: 'Professional' }], multiSelect: false }] });
+  q.respond({ allow: true, input: { ...q.input, answers: { 'Which tone?': 'Friendly' } } });
+  assert.deepEqual(written.find((w) => w.id === 2 && w.result)?.result, { outcome: { outcome: 'answered', answers: [{ questionId: 'tone', selectedOptionIds: ['f'] }] } });
+});
+
+test("Cursor's subagents are workers until their tool call ends", () => {
+  const started: string[] = [];
+  const ended: [string, string][] = [];
+  const { session, update } = setup();
+  session['host'].subagents = { start: (id: string, kind: string) => void started.push(`${id}:${kind}`), end: (id: string, st: string) => void ended.push([id, st]), progress: () => {}, isSubagent: () => true, background: () => {}, stopped: () => {} } as never;
+  update({ sessionUpdate: 'tool_call', toolCallId: 'k1', title: 'Task', kind: 'other', status: 'in_progress', rawInput: { description: 'explore' } });
+  session.handle({ jsonrpc: '2.0', method: 'cursor/task', params: { toolCallId: 'k1', description: 'Find uses', prompt: 'Find every use of Token.text', subagentType: 'explore' } });
+  update({ sessionUpdate: 'tool_call_update', toolCallId: 'k1', status: 'completed', content: [{ type: 'content', content: { type: 'text', text: '4 files' } }] });
+  assert.deepEqual(started, ['k1:explore']);
+  assert.deepEqual(ended, [['k1', 'done']]);
 });

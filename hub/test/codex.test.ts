@@ -52,7 +52,9 @@ test('approvals become cards; their answers go back as decisions; anything else 
   edit.respond({ allow: false, message: 'no' });
   again.respond({ allow: false, message: 'Interrupted', interrupt: true });
   bash.respond({ allow: false, message: 'twice' });
-  assert.deepEqual(written.map((w) => [w.id, w.result?.decision]), [[7, 'accept'], [8, 'decline'], [9, 'cancel']], 'each answered once');
+  assert.deepEqual(written.filter((w) => w.result).map((w) => [w.id, w.result.decision]), [[7, 'accept'], [8, 'decline'], [9, 'cancel']], 'each answered once');
+  // A rejection with a note tells Codex the note.
+  assert.match(written.find((w) => w.method === 'turn/start')?.params.input[0].text ?? '', /rejected that call: no/);
 
   written.length = 0;
   session.handle({ id: 10, method: 'mcpServer/elicitation/request', params: {} });
@@ -86,4 +88,76 @@ test("Doublet's modes as Codex's policies", () => {
   assert.deepEqual([codexPolicy('plan', '/w').sandbox, codexPolicy('plan', '/w').sandboxPolicy.type], ['read-only', 'readOnly']);
   assert.equal(codexPolicy('acceptEdits', '/w').approvalPolicy, 'on-request');
   assert.deepEqual([codexPolicy('bypassPermissions', '/w').approvalPolicy, codexPolicy('bypassPermissions', '/w').sandbox], ['never', 'danger-full-access']);
+});
+
+test("Codex's plan and questions use Claude's cards; approving the plan leaves plan mode and starts the work", async () => {
+  const { session, written, of } = setup();
+  session['mode'] = 'plan';
+  session.handle({ method: 'item/completed', params: { item: { type: 'plan', id: 'turn-1-plan', text: '## Add a README\n- write it' } } });
+  const plan = of('approval')[0];
+  assert.deepEqual([plan.tool, plan.input.plan], ['ExitPlanMode', '## Add a README\n- write it']);
+  plan.respond({ allow: true, input: { plan: '## Add a README\n- write it, short' } });
+  await new Promise((r) => setImmediate(r));
+  assert.deepEqual(of('mode').at(-1), { type: 'mode', mode: 'default' });
+  const start = written.find((w) => w.method === 'turn/start');
+  assert.match(start.params.input[0].text, /approved your plan, with their edits[\s\S]*write it, short/);
+  assert.equal(start.params.collaborationMode.mode, 'default', 'out of plan mode');
+
+  session.handle({ method: 'item/completed', params: { item: { type: 'agentMessage', id: 'm9', text: 'Which tone?', questions: [{ title: 'Which tone?', options: ['Friendly', 'Formal'] }] } } });
+  const q = of('approval')[1];
+  assert.deepEqual(q.input, { questions: [{ question: 'Which tone?', options: [{ label: 'Friendly' }, { label: 'Formal' }], multiSelect: false }] });
+  q.respond({ allow: true, input: { ...q.input, answers: { 'Which tone?': 'Friendly' } } });
+  await new Promise((r) => setImmediate(r));
+  assert.ok(written.some((w) => w.method === 'turn/start' && /Which tone\? Friendly/.test(w.params.input[0].text)), 'the answers go to Codex as the next message');
+
+  // A blocking question (requestUserInput) is answered in place, by option label.
+  session.handle({ id: 20, method: 'item/tool/requestUserInput', params: { itemId: 'u1', questions: [{ id: 'q', header: 'Tone', question: 'Tone?', isOther: false, isSecret: false, options: [{ label: 'Friendly', description: '' }] }], isBlocking: true } });
+  of('approval')[2].respond({ allow: true, input: { answers: { 'Tone?': 'Friendly' } } });
+  assert.deepEqual(written.find((w) => w.id === 20)?.result, { answers: { q: { answers: ['Friendly'] } } });
+});
+
+test('an edited command is refused, and Codex is told what to run instead; reject uses a decision Codex offers', async () => {
+  const { session, written, of } = setup();
+  session.handle({ id: 30, method: 'item/commandExecution/requestApproval', params: { itemId: 'c', command: 'rm -rf build', availableDecisions: ['accept', 'cancel'] } });
+  of('approval')[0].respond({ allow: true, input: { command: 'rm -rf build/tmp' } });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(written.find((w) => w.id === 30)?.result.decision, 'cancel', 'decline is not on offer here');
+  assert.match(written.find((w) => w.method === 'turn/start')?.params.input[0].text, /Run this instead: rm -rf build\/tmp/);
+});
+
+test('a compaction is reported once, whichever way Codex says it', () => {
+  const { session, of } = setup();
+  session.handle({ method: 'item/completed', params: { item: { type: 'contextCompaction', id: 'cc1' } } });
+  session.handle({ method: 'thread/compacted', params: { threadId: 'th-1' } });
+  assert.equal(of('compacted').length, 1);
+  session.handle({ method: 'thread/compacted', params: { threadId: 'th-1' } });
+  assert.equal(of('compacted').length, 2, 'an older version says it only here');
+});
+
+test("Codex's own subagents are workers, from spawn to their end", () => {
+  const started: string[] = [];
+  const ended: [string, string][] = [];
+  const { session } = setup();
+  session['host'].subagents = { start: (id: string, kind: string) => void started.push(`${id}:${kind}`), end: (id: string, st: string) => void ended.push([id, st]), progress: () => {}, isSubagent: () => true, background: () => {}, stopped: () => {} } as never;
+  const call = (status: string, states: Record<string, unknown>) => ({ type: 'collabAgentToolCall', id: 'k1', tool: 'spawnAgent', status, senderThreadId: 'th-1', receiverThreadIds: ['ag-1'], prompt: 'Find every use of Token.text', model: 'gpt-6-luna', agentsStates: states });
+  session.handle({ method: 'item/started', params: { item: call('inProgress', {}) } });
+  session.handle({ method: 'item/completed', params: { item: call('completed', { 'ag-1': { status: 'running', message: null } }) } });
+  assert.deepEqual(started, ['ag-1:gpt-6-luna'], 'started once');
+  session.handle({ method: 'item/completed', params: { item: { type: 'collabAgentToolCall', id: 'k2', tool: 'wait', status: 'completed', receiverThreadIds: ['ag-1'], agentsStates: { 'ag-1': { status: 'completed', message: '4 files' } } } } });
+  assert.deepEqual(ended, [['ag-1', 'done']]);
+});
+
+test('a plan approved while its turn still runs starts the work in a turn of its own, out of plan mode', async () => {
+  const { session, written, of } = setup();
+  session['mode'] = 'plan';
+  session['turnId'] = 'turn-plan';
+  session.handle({ method: 'item/completed', params: { item: { type: 'plan', id: 'p', text: '## Plan' } } });
+  of('approval')[0].respond({ allow: true, input: { plan: '## Plan' } });
+  await new Promise((r) => setImmediate(r));
+  assert.equal(written.filter((w) => w.method === 'turn/steer' || w.method === 'turn/start').length, 0, 'not steered into the read-only turn');
+  session.handle({ method: 'turn/completed', params: { threadId: 'th-1', turn: { id: 'turn-plan', status: 'completed', error: null, durationMs: 1 } } });
+  await new Promise((r) => setImmediate(r));
+  const start = written.find((w) => w.method === 'turn/start');
+  assert.equal(start?.params.collaborationMode.mode, 'default');
+  assert.match(start?.params.input[0].text, /approved your plan/);
 });
