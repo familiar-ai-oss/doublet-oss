@@ -263,8 +263,14 @@ struct AnnotationDetail: View {
         #else
         let img = Image(nsImage: image)
         #endif
+        #if os(macOS)
+        // Bigger than the iPad's card: a note 360 points across was hard to read on a large display.
+        let most = CGSize(width: 640, height: 280)
+        #else
+        let most = CGSize(width: 360, height: 160)
+        #endif
         return img.resizable().scaledToFit()
-            .frame(maxWidth: 360, maxHeight: 160, alignment: .leading)
+            .frame(maxWidth: most.width, maxHeight: most.height, alignment: .leading)
             .padding(10)
             .background { RoundedRectangle(cornerRadius: 12).fill(Color.white) }
             .overlay { RoundedRectangle(cornerRadius: 12).strokeBorder(.separator) }

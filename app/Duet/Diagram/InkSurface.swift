@@ -857,17 +857,23 @@ final class InkSurfaceView: UIView, PKCanvasViewDelegate, UIPencilInteractionDel
         }
     }
 
-    /// One note's handwriting as a small PNG (base64): dark ink on clear, readable on any device.
+    /// One note's handwriting as a PNG (base64): dark ink on clear, readable on any device. Up to 1,280 pixels across,
+    /// so it's still sharp in the Mac's larger card on a big display (a line or a few of writing is about 50–140 KB).
+    /// The hub keeps at most 512 KB of it, so a note too dense for that goes at the old 640 pixels instead.
     func inkPNG(_ d: DraftNote) -> String? {
         let strokes = canvas.drawing.strokes.filter { d.strokeIDs.contains($0.id) }
         guard !strokes.isEmpty else { return nil }
         let rect = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }.insetBy(dx: -6, dy: -6)
-        let scale = min(2, 640 / max(rect.width, rect.height, 1))
-        var image: UIImage?
-        UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
-            image = PKDrawing(strokes: strokes).image(from: rect, scale: scale)
+        let drawing = PKDrawing(strokes: strokes)
+        func png(_ pixels: CGFloat, upTo most: CGFloat) -> Data? {
+            var image: UIImage?
+            UITraitCollection(userInterfaceStyle: .light).performAsCurrent {
+                image = drawing.image(from: rect, scale: min(most, pixels / max(rect.width, rect.height, 1)))
+            }
+            return image?.pngData()
         }
-        return image?.pngData()?.base64EncodedString()
+        guard let data = png(1280, upTo: 3) else { return nil }
+        return (data.count < 480 << 10 ? data : png(640, upTo: 2))?.base64EncodedString()
     }
 
     // MARK: the note's picture: the page with the ink on it (around the notes, for a long diff)
