@@ -309,6 +309,9 @@ struct FileViewer: View {
     @State private var changeIndex = 0
     #if os(iOS)
     @State private var ink = InkController()
+    @State private var nativeInk = NativeInkController()
+    /// A prototype: code drawn natively under a canvas that is the page, as in Notes (no notes or saving yet).
+    @AppStorage("nativeCodePage") private var nativeCode = false
     #endif
 
     private var pencil: Bool {
@@ -451,7 +454,9 @@ struct FileViewer: View {
         let doc = DiagramDocument.code(path: f.path, text: f.text ?? "", changed: f.changed ?? [], removedAfter: f.removedAfter ?? [],
                                        marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? ""))
         #if os(iOS)
-        if pencil {
+        if pencil, nativeCode {
+            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk)
+        } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
         } else {
@@ -496,7 +501,7 @@ struct FileViewer: View {
             }
         }
         #if os(iOS)
-        if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { ink.toggleTools() } }
+        if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { nativeCode ? nativeInk.toggleTools() : ink.toggleTools() } }
         #endif
         Button("Side Chat", systemImage: "bubble.left.and.bubble.right") { model.openSideChat(about: .file(path: path)) }
             .help("Ask a quick question about this file, beside the conversation (⌘⇧K)")
@@ -512,6 +517,9 @@ struct FileViewer: View {
             if let text = file?.text { Button("Copy Text", systemImage: "doc.on.clipboard") { Pasteboard.copy(text) } }
             Button("Open Shell Here", systemImage: "terminal") { model.openTerminal(.shell, cwd: (path as NSString).deletingLastPathComponent) }
             Button("Reload", systemImage: "arrow.clockwise") { Task { await load() } }
+            #if os(iOS)
+            if pencil { Toggle("Native Page (Prototype)", systemImage: "pencil.and.outline", isOn: $nativeCode) }
+            #endif
         } label: { Label("More", systemImage: "ellipsis.circle") }
     }
 
