@@ -397,8 +397,17 @@ struct LiveReply: View {
 
     var body: some View {
         let text = model.store.liveText
+        let status = model.store.leadStatus
         VStack(alignment: .leading, spacing: 0) {
-            if !text.isEmpty {
+            if text.isEmpty, status.busy, status.phase != .approval {
+                // Before the first words arrive: say Claude is on it, so a long think doesn't read as nothing happening.
+                HStack(spacing: DS.space8) {
+                    PulsingSymbol(systemName: status.symbol, tint: status.phase.tint, active: true)
+                    Text(status.label + "…").foregroundStyle(.textSecondary)
+                }
+                .padding(.vertical, DS.space4)
+                .accessibilityElement(children: .combine)
+            } else if !text.isEmpty {
                 ForEach(Array(LeadRow.split(text).enumerated()), id: \.offset) { _, chunk in
                     Text(chunk).frame(maxWidth: .infinity, alignment: .leading)
                 }

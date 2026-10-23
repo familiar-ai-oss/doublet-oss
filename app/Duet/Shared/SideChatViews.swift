@@ -231,6 +231,8 @@ struct SideChatView: View {
                     TextField(chat == nil ? "Ask about \(about?.title ?? "the conversation")…" : "Follow up…", text: $draft, axis: .vertical)
                         .lineLimit(1...6)
                         .textFieldStyle(.plain)
+                        // The row's .title2 sizes its buttons; the words you type stay body text.
+                        .font(.body)
                         .focused($focused)
                         .sendsOnReturn($draft, send: send)
                         .accessibilityIdentifier("side-chat-field")
