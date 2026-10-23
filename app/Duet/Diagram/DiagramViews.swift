@@ -150,6 +150,8 @@ struct DiagramCard: View {
     @Environment(AppModel.self) private var model
     @Environment(\.density) private var density
     let diagram: DiagramEvent
+    /// What a tap does instead of opening it in its place (a diagram written into an answer has none: FencedDiagram).
+    var open: (() -> Void)? = nil
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -190,7 +192,7 @@ struct DiagramCard: View {
         .padding(10)
         .background { RoundedRectangle(cornerRadius: 14, style: .continuous).fill(.background.secondary) }
         .contentShape(Rectangle())
-        .onTapGesture { model.openDiagram(diagram.id, compact: density == .compact) }
+        .onTapGesture { if let open { open() } else { model.openDiagram(diagram.id, compact: density == .compact) } }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityHint("Opens the diagram")

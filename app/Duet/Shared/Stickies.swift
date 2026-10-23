@@ -272,7 +272,7 @@ struct StickyNote: View {
         if let answer = c.answer {
             if sticky.expanded, !c.streaming {
                 ScrollView {
-                    Markdown(answer).markdownSoftBreakMode(.lineBreak).textSelection(.enabled)
+                    Markdown(answer).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .frame(maxHeight: 360)

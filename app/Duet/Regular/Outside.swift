@@ -117,7 +117,7 @@ struct OutsideMessageRow: View {
         } else {
             VStack(alignment: .leading, spacing: 6) {
                 if !message.text.isEmpty {
-                    Markdown(message.text).markdownSoftBreakMode(.lineBreak).textSelection(.enabled)
+                    Markdown(message.text).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 ForEach(Array((message.tools ?? []).enumerated()), id: \.offset) { _, tool in

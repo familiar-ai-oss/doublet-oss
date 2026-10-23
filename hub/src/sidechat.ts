@@ -451,10 +451,13 @@ export function notePrompt(note: string, forked: Forked): string {
   return `${head}\n\n${note}`;
 }
 
+/** A side chat has no diagram tool (a note's thread does): a Mermaid block in its answer is drawn as a diagram card. */
+export const SIDE_DIAGRAM = 'To show a diagram, put Mermaid source in a ```mermaid block: Doublet draws it as a diagram, so don\'t say you can\'t draw.';
+
 /** The first question of a side chat: what it is, what it's about, and the question. */
 export function sidePrompt(by: string, text: string, about: SideAbout | undefined, forked: Forked): string {
   const seen = seenSoFar(forked);
-  const head = `[Side chat from ${by}: a quick question beside our conversation. Nothing here goes into the conversation itself, so answer directly. ${ANSWER_FIRST} You can read and search files, search the web and open documentation pages, but not change anything, run commands or hand out work. Name the file and line, or the page, an answer comes from; if you can't find it, say so.${seen}]`;
+  const head = `[Side chat from ${by}: a quick question beside our conversation. Nothing here goes into the conversation itself, so answer directly. ${ANSWER_FIRST} You can read and search files, search the web and open documentation pages, but not change anything, run commands or hand out work. ${SIDE_DIAGRAM} Name the file and line, or the page, an answer comes from; if you can't find it, say so.${seen}]`;
   return [head, about ? describeAbout(about) : '', text].filter(Boolean).join('\n\n');
 }
 
