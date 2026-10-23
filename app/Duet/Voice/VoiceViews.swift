@@ -246,9 +246,8 @@ struct TalkOrb: View {
     private var tint: Color {
         switch phase {
         case .listening: .stateWorking
-        case .speaking: .purple
-        case .working, .starting: .gray
-        case .paused: .secondary
+        case .speaking: .stateWorking
+        case .working, .starting, .paused: .stateIdle
         }
     }
 

@@ -65,10 +65,8 @@ struct NoteDisplay {
         case .change, .remove: .penRed
         case .question: .penChalk
         case .approve: .penGreen
-        case .connect: .purple
-        case .group: .orange
-        case .emphasize: .yellow
-        case .comment: .gray
+        case .connect, .group, .comment: .textSecondary
+        case .emphasize: .pencilHover
         }
     }
 
@@ -457,7 +455,7 @@ struct InkPanel<Content: View>: View {
     var body: some View {
         content
             .frame(maxWidth: 460)
-            .background { RoundedRectangle(cornerRadius: 18, style: .continuous).fill(.regularMaterial).shadow(color: .black.opacity(0.12), radius: 10, y: 3) }
+            .glassPanel(radius: 18) // sits over the ink: opaque while the Pencil is down
             .padding(12)
     }
 }
@@ -626,7 +624,7 @@ struct NotesBubble: View {
                 }
             }
             .padding(.horizontal, 12).padding(.vertical, 9)
-            .background { RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.accentColor.opacity(0.14)) }
+            .background { RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.slateHigh) }
             .onTapGesture {
                 switch notes.surface {
                 case .diagram(let id, _, _): model.openDiagram(id, compact: density == .compact)

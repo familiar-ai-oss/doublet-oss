@@ -22,7 +22,7 @@ struct TerminalScreen: View {
                                 Button { model.selectedTerminal = t.id } label: {
                                     Label(t.title, systemImage: TerminalKinds.symbol(t.kind)).font(.caption)
                                         .padding(.horizontal, 10).padding(.vertical, 5)
-                                        .background { Capsule().fill(current == t.id ? Color.accentColor.opacity(0.22) : Color.secondary.opacity(0.1)) }
+                                        .background { Capsule().fill(current == t.id ? Color.slateHigh : Color.secondary.opacity(0.1)) }
                                 }
                                 .buttonStyle(.plain)
                             }

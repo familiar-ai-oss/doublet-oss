@@ -209,7 +209,7 @@ private struct WaitingPrompt: View {
         VStack(alignment: .trailing, spacing: 3) {
             Text(prompt.text ?? "").textSelection(.enabled)
                 .padding(.horizontal, 12).padding(.vertical, 9)
-                .background { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.accentColor.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3])) }
+                .background { RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(Color.stateNeedsYou.opacity(0.35), style: StrokeStyle(lineWidth: 1, dash: [4, 3])) }
                 .foregroundStyle(.secondary)
             Label("Waiting for Claude…", systemImage: "clock")
                 .font(.caption2).foregroundStyle(.secondary)
@@ -294,7 +294,7 @@ struct LeadRowView: View {
                 VStack(alignment: .trailing, spacing: 3) {
                     Text(text).textSelection(.enabled)
                         .padding(.horizontal, 12).padding(.vertical, 9)
-                        .background { RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.accentColor.opacity(0.14)) }
+                        .background { RoundedRectangle(cornerRadius: 16, style: .continuous).fill(Color.slateHigh) }
                     // Spoken: what the recognizer heard, which may not be word for word.
                     Label(by == model.device ? "You" : by, systemImage: "waveform")
                         .labelStyle(SpokenLabelStyle(spoken: voice))

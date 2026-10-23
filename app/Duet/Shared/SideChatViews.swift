@@ -103,9 +103,9 @@ struct SideChatView: View {
         HStack(spacing: 10) {
             // In its own window, once asked: the window's handle, to drag onto the main window's tabs.
             if inWindow, let id = chatId {
-                PaneHandle(place: .sideChat(id)).foregroundStyle(Color.accentColor).font(.title3)
+                PaneHandle(place: .sideChat(id)).foregroundStyle(Color.stateNeedsYou).font(.title3)
             } else {
-                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Color.accentColor).font(.title3)
+                Image(systemName: "bubble.left.and.bubble.right.fill").foregroundStyle(Color.stateNeedsYou).font(.title3)
             }
             VStack(alignment: .leading, spacing: 2) {
                 Text(chat?.title ?? "Side Chat").font(.headline).lineLimit(1)
@@ -323,7 +323,7 @@ struct SideMessageRow: View {
             VStack(alignment: .trailing, spacing: 3) {
                 Text(message.text).textSelection(.enabled)
                     .padding(.horizontal, 10).padding(.vertical, 7)
-                    .background { RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.accentColor.opacity(0.14)) }
+                    .background { RoundedRectangle(cornerRadius: 12, style: .continuous).fill(Color.slateHigh) }
                 if message.image == true {
                     Label("With a picture of your notes", systemImage: "pencil.and.scribble").font(.caption2).foregroundStyle(.secondary)
                 }

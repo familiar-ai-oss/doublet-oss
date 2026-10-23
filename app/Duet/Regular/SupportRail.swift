@@ -333,7 +333,7 @@ private struct YourNotesCard: View {
     var body: some View {
         let waiting = threads.filter(\.waiting).count
         RailCard(title: "Your notes", symbol: "pencil.and.scribble", summary: waiting > 0 ? "\(waiting) waiting" : "\(threads.count)",
-                 tint: .orange, highlight: .yellow) {
+                 tint: .stateNeedsYou, highlight: .stateNeedsYou) {
             ForEach(showsAll ? threads : Array(threads.prefix(4))) { t in
                 Button { model.show(t.place) } label: { ThreadRow(item: t) }
                     .buttonStyle(.plain)

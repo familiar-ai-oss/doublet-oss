@@ -276,7 +276,7 @@ struct ExplorerRowView: View {
         }
         .buttonStyle(.plain)
         .simultaneousGesture(TapGesture(count: 2).onEnded { if !e.isFolder { model.open(file: row.path, keep: true) } })
-        .listRowBackground(picked ? RoundedRectangle(cornerRadius: 6).fill(Color.accentColor.opacity(0.16)).padding(.horizontal, 6) : nil)
+        .listRowBackground(picked ? RoundedRectangle(cornerRadius: 6).fill(Color.slateHigh).padding(.horizontal, 6) : nil)
         .contextMenu { menu }
         .draggable(row.path)
         .accessibilityLabel("\(e.isFolder ? "Folder" : "File") \(e.name)\(e.git.map { ", \(GitBadge.name($0))" } ?? "")")
@@ -292,7 +292,7 @@ struct ExplorerRowView: View {
                 .frame(width: 10)
             Image(systemName: e.isFolder ? (open ? "folder" : "folder.fill") : FileIcon.symbol(e))
                 .font(.callout)
-                .foregroundStyle(e.isFolder ? Color.accentColor : .secondary)
+                .foregroundStyle(e.isFolder ? Color.textSecondary : .secondary)
                 .frame(width: 18)
             Text(e.name)
                 .lineLimit(1).truncationMode(.middle)
@@ -304,7 +304,7 @@ struct ExplorerRowView: View {
                 if let touch = recentTouch { TouchDot(touch: touch, folder: e.isFolder) }
             }
             let notes = noteCount
-            if notes > 0 { Image(systemName: "text.bubble.fill").font(.caption2).foregroundStyle(Color.accentColor).help("\(notes) note\(notes == 1 ? "" : "s")") }
+            if notes > 0 { Image(systemName: "text.bubble.fill").font(.caption2).foregroundStyle(Color.stateNeedsYou).help("\(notes) note\(notes == 1 ? "" : "s")") }
             if let g = e.git {
                 Text(g == "•" ? "●" : g).font(.caption2.monospaced().bold()).foregroundStyle(GitBadge.tint(g))
                     .help(GitBadge.name(g))

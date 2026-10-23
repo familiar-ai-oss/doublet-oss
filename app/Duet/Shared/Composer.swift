@@ -77,7 +77,7 @@ struct Composer: View {
                     .accessibilityIdentifier("composer")
                 Toggle(isOn: $model.boost) { Label("Boost", systemImage: model.boost ? "flame.fill" : "flame") }
                     .toggleStyle(.button).labelStyle(.iconOnly)
-                    .tint(.orange)
+                    .tint(.stateNeedsYou)
                     .help("Boost: think harder on this turn (ultrathink)")
                     .accessibilityIdentifier("boost")
                 if store.leadStatus.busy && density != .compact {
@@ -147,9 +147,9 @@ private struct ContextChip: View {
             .accessibilityLabel("Remove \(context.label)")
         }
         .font(.caption)
-        .foregroundStyle(Color.accentColor)
+        .foregroundStyle(Color.stateNeedsYou)
         .padding(.leading, 9).padding(.trailing, 6).padding(.vertical, 4)
-        .background { Capsule().fill(Color.accentColor.opacity(0.12)) }
+        .background { Capsule().fill(Color.slateHigh) }
         .help("Sent with your message, so Claude knows what you're asking about")
         .accessibilityElement(children: .contain)
         .accessibilityLabel("About \(context.label), sent with your message")

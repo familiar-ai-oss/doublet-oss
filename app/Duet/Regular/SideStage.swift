@@ -191,7 +191,7 @@ private struct PaneBar: View {
         }
         .frame(minHeight: dense ? 24 : 30)
         .overlay(alignment: .top) {
-            if focused { Rectangle().fill(Color.accentColor).frame(height: 2) }
+            if focused { Rectangle().fill(Color.stateNeedsYou).frame(height: 2) }
         }
     }
 }

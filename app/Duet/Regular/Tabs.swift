@@ -105,7 +105,7 @@ private struct ReorderCaret: View {
 
     var body: some View {
         if case .reorder(let before)? = drag.target, let x = x(before) {
-            Capsule().fill(Color.accentColor)
+            Capsule().fill(Color.stateNeedsYou)
                 .frame(width: 3, height: 30)
                 .offset(x: x - 1.5)
                 .allowsHitTesting(false)
@@ -137,7 +137,7 @@ struct OverviewChip: View {
         HStack(spacing: 6) {
             Image(systemName: "rectangle.grid.1x2")
                 .font(dense ? .caption : .footnote)
-                .foregroundStyle(selected && (workspace.split == nil || workspace.focus == pane) ? Color.accentColor : .secondary)
+                .foregroundStyle(selected && (workspace.split == nil || workspace.focus == pane) ? Color.stateNeedsYou : .secondary)
             Text("Overview").lineLimit(1)
                 .foregroundStyle(selected ? .primary : .secondary)
             if workspace.split != nil, let pane { PaneMarker(pane: pane) }
@@ -193,7 +193,7 @@ struct TabChip: View {
         HStack(spacing: 6) {
             Image(systemName: model.symbol(of: tab.place))
                 .font(dense ? .caption : .footnote)
-                .foregroundStyle(focused ? Color.accentColor : .secondary)
+                .foregroundStyle(focused ? Color.stateNeedsYou : .secondary)
                 .frame(width: 16)
             Text(name).italic(tab.isPreview).lineLimit(1).truncationMode(.tail)
                 .foregroundStyle(selected ? .primary : .secondary)
