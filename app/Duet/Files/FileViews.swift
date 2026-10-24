@@ -363,10 +363,10 @@ struct FileViewer: View {
         .task(id: "\(path)|\(model.store.isConnected)") {
             guard model.store.isConnected || model.isDemo else { return }
             await load()
-            if let line { page.reveal(line: line) }
+            if let line { reveal(line) }
         }
         // Opened again at another line: its tab stays, and shows that line.
-        .onChange(of: line) { _, l in if let l { page.reveal(line: l) } }
+        .onChange(of: line) { _, l in if let l { reveal(l) } }
         // While work goes on in its folder, the file keeps up: its folder is checked every 4 seconds, and the file is
         // read again when it changed.
         .task(id: workGoesOn(in: (path as NSString).deletingLastPathComponent, model.store)) {
@@ -458,7 +458,11 @@ struct FileViewer: View {
                                        marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? ""))
         #if os(iOS)
         if pencil, nativeCode {
-            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts)
+            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts,
+                                       decor: CodePageDecor(changed: Set(f.changed ?? []), removedAfter: Set(f.removedAfter ?? []),
+                                                            marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? "")),
+                                       onSelect: { selected = $0 }, onMark: { ids in page.onMark?(ids) },
+                                       onDiagram: { id, element in page.onDiagram?(id, element) })
         } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
@@ -499,7 +503,12 @@ struct FileViewer: View {
         if let changed = file?.changed, !changed.isEmpty {
             Button("Next Change", systemImage: "arrow.down.to.line") {
                 let starts = changeStarts(changed)
-                page.scrollTo(line: starts[changeIndex % starts.count])
+                let to = starts[changeIndex % starts.count]
+                #if os(iOS)
+                if pencil, nativeCode { nativeInk.scrollTo(line: to) } else { page.scrollTo(line: to) }
+                #else
+                page.scrollTo(line: to)
+                #endif
                 changeIndex += 1
             }
         }
@@ -572,6 +581,14 @@ struct FileViewer: View {
     }
 
     /// What this file opens (its notes): in its window's own stack, else where the layout opens things.
+    /// Show and pick a line, on whichever page shows the file.
+    private func reveal(_ line: Int) {
+        #if os(iOS)
+        if pencil, nativeCode { nativeInk.reveal(line: line); return }
+        #endif
+        page.reveal(line: line)
+    }
+
     private func push(_ route: FilesRoute) {
         if let filesStack { filesStack.path.append(route) } else { model.open(route, compact: density == .compact) }
     }

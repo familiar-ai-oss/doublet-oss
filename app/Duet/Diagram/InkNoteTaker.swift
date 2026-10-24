@@ -98,6 +98,37 @@ final class InkNoteTaker {
         await finish(ids, into: into)
     }
 
+    /// The file changed under its notes: each note's lines are found again by their code, and its ink moves the same
+    /// number of lines. Notes whose code is gone stay where they were. Whether anything moved.
+    @discardableResult
+    func follow(_ text: String) -> Bool {
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
+        var drawing = canvas.drawing
+        var renamed: [UUID: UUID] = [:]
+        for i in drafts.indices {
+            guard let tagged = drafts[i].note.lines, let first = tagged.first, let now = Reanchor.place(first, in: lines) else { continue }
+            let shift = now.lowerBound - first.start
+            guard shift != 0 else { continue }
+            let t = CGAffineTransform(translationX: 0, y: CGFloat(shift) * CodePageGeometry.lineHeight)
+            for j in drawing.strokes.indices where drafts[i].strokeIDs.contains(drawing.strokes[j].id) {
+                // A moved stroke gets a new id: the canvas redraws strokes it hasn't seen, not ones it has that moved.
+                let s = drawing.strokes[j]
+                let moved = PKStroke(ink: s.ink, path: s.path, transform: s.transform.concatenating(t), mask: s.mask, randomSeed: s.randomSeed)
+                renamed[s.id] = moved.id
+                drawing.strokes[j] = moved
+            }
+            drafts[i].strokeIDs = Set(drafts[i].strokeIDs.map { renamed[$0] ?? $0 })
+            drafts[i].bounds = drafts[i].bounds.applying(t)
+            drafts[i].note.lines = tagged.map { InkLines(file: $0.file, start: $0.start + shift, end: $0.end + shift, code: $0.code) }
+        }
+        guard !renamed.isEmpty else { return false }
+        // Known before the canvas hears of them, so they aren't taken for new ink.
+        known.subtract(renamed.keys)
+        known.formUnion(renamed.values)
+        canvas.drawing = drawing
+        return true
+    }
+
     /// Notes edited or removed from SwiftUI (the tray). A deleted note's ink goes with it, unless another note uses it.
     func setDrafts(_ new: [DraftNote]) {
         let gone = Set(drafts.map(\.id)).subtracting(new.map(\.id))

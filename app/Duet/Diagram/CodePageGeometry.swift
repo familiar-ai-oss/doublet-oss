@@ -8,7 +8,8 @@ import Foundation
 struct CodePageGeometry: Equatable {
     static let lineHeight: CGFloat = 20
     static let fontSize: CGFloat = 13
-    static let top: CGFloat = 12, left: CGFloat = 12, bottom: CGFloat = 40, right: CGFloat = 24
+    /// `left` leaves room in the gutter for a note's bubble or a diagram's mark before the line number.
+    static let top: CGFloat = 12, left: CGFloat = 24, bottom: CGFloat = 40, right: CGFloat = 24
 
     let lineCount: Int
     /// The longest line, in characters.

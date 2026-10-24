@@ -24,6 +24,11 @@ final class NativeInkController {
     func rename(_ id: UUID, to name: String) { view?.rename(id, to: name) }
     func remove(_ id: UUID) { view?.remove(id) }
 
+    /// Show this line (from a note or a diagram), picked.
+    func reveal(line: Int) { view?.reveal(line: line) }
+    /// Scroll to this line, as Next Change does.
+    func scrollTo(line: Int) { view?.scrollTo(line: line) }
+
     func finishNote() async { await view?.notes.finishGroup() }
     func snapshot() async -> UIImage? { view?.snapshot() }
 
@@ -51,6 +56,13 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
     let text: String
     let controller: NativeInkController
     @Binding var drafts: [DraftNote]
+    var decor = CodePageDecor()
+    /// A line picked with a finger (nil: none).
+    var onSelect: (InkAnchor?) -> Void = { _ in }
+    /// A note's bubble or card: open those notes.
+    var onMark: ([String]) -> Void = { _ in }
+    /// A diagram's mark or card: open it, with that element picked.
+    var onDiagram: (String, String?) -> Void = { _, _ in }
 
     /// Whether SwiftUI has heard of the notes the view restored. Until then its (empty) list mustn't replace them.
     final class Coordinator { var synced = false }
@@ -60,7 +72,8 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
     func makeUIView(context: Context) -> NativeCodeInkView {
         let v = NativeCodeInkView(key: "file-\(path)")
         v.onDrafts = { drafts = $0 }
-        v.show(path: path, text: text)
+        callbacks(v)
+        v.show(path: path, text: text, decor: decor)
         controller.view = v
         let restored = v.notes.drafts, coordinator = context.coordinator
         DispatchQueue.main.async {
@@ -72,8 +85,15 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
 
     func updateUIView(_ v: NativeCodeInkView, context: Context) {
         v.onDrafts = { drafts = $0 }
-        v.show(path: path, text: text)
+        callbacks(v)
+        v.show(path: path, text: text, decor: decor)
         if context.coordinator.synced, drafts != v.notes.drafts { v.setDrafts(drafts) }
+    }
+
+    private func callbacks(_ v: NativeCodeInkView) {
+        v.onSelect = onSelect
+        v.onMark = onMark
+        v.onDiagram = onDiagram
     }
 }
 
@@ -107,7 +127,17 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     private var shown: (path: String, text: String)?
     /// A new version of the file that came while a note was being written: shown once it's done, so the lines don't
     /// move under the Pencil.
-    private var waiting: (path: String, text: String)?
+    private var waiting: (path: String, text: String, decor: CodePageDecor)?
+    private var decor = CodePageDecor()
+    private lazy var decorations = CodeDecorations(in: code)
+    /// The page's size at zoom 1, with its cards.
+    private var pageSize = CGSize(width: 1, height: 1)
+    /// The picked line.
+    private var selectedLine: Int?
+    /// A line to show once the file is up.
+    private var pendingReveal: Int?
+    /// The last tap, to tell a double tap's second tap from a new one.
+    private var lastTap: (time: CFTimeInterval, at: CGPoint)?
     private var geometry = CodePageGeometry(lineCount: 1, columns: 1, advance: 8)
     private var anchors: [InkAnchor] = []
     private var book: CodeNoteBook?
@@ -117,6 +147,9 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     /// at the new size once it ends, so it's sharp at rest (the ink is PencilKit's, sharp at every zoom).
     private var drawnZoom: CGFloat = 1
     var onDrafts: (([DraftNote]) -> Void)?
+    var onSelect: ((InkAnchor?) -> Void)?
+    var onMark: (([String]) -> Void)?
+    var onDiagram: ((String, String?) -> Void)?
     /// SwiftUI's handle, for the toolbar's page menu.
     weak var controller: NativeInkController?
 
@@ -164,6 +197,16 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         // Strokes are ink, never text input.
         for v in [canvas, code] as [UIView] { v.addInteraction(UIScribbleInteraction(delegate: self)) }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawCode() }
+        // Fingers pick: one tap picks a line or opens what's tapped, two zoom in or back out. (The Pencil only draws.)
+        let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
+        let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
+        doubleTap.numberOfTapsRequired = 2
+        doubleTap.allowedTouchTypes = direct
+        canvas.addGestureRecognizer(doubleTap)
+        // A tap acts at once rather than waiting out a possible double tap; the second tap of a double tap is ignored.
+        let tap = UITapGestureRecognizer(target: self, action: #selector(tapped(_:)))
+        tap.allowedTouchTypes = direct
+        canvas.addGestureRecognizer(tap)
         notes.anchors = { [weak self] in self?.anchors ?? [] }
         notes.onChange = { [weak self] in self?.notesChanged() }
         notes.onTagged = { [weak self] p in
@@ -175,25 +218,36 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     required init?(coder: NSCoder) { fatalError() }
 
     /// Show this version of the file, or (while a note is being written) once the note is done.
-    func show(path: String, text: String) {
-        if let shown, shown.path == path, shown.text == text { return }
-        guard !penDown, !notes.busy else { waiting = (path, text); return }
+    func show(path: String, text: String, decor: CodePageDecor) {
+        if let shown, shown.path == path, shown.text == text, decor == self.decor { return }
+        guard !penDown, !notes.busy else { waiting = (path, text, decor); return }
         waiting = nil
-        let first = shown?.path != path
+        let first = shown?.path != path, changed = shown?.text != text
         shown = (path, text)
+        self.decor = decor
         geometry = CodePageGeometry(text: text, advance: Self.advance)
         if first {
             let book = CodeNoteBook.load(key: key, geometry: geometry)
             self.book = book
-            notes.load((try? PKDrawing(data: book.page.drawing)) ?? PKDrawing(), drafts: book.page.drafts)
+            loadPage(book.page)
             publishPages()
+        } else if changed {
+            // The file changed under its notes: each note's ink moves with its lines.
+            if notes.follow(text) { onDrafts?(notes.drafts); save() }
         }
         drawCode()
+        if let line = pendingReveal { pendingReveal = nil; reveal(line: line) }
     }
 
     private func showWaiting() {
         guard let w = waiting, !penDown, !notes.busy else { return }
-        show(path: w.path, text: w.text)
+        show(path: w.path, text: w.text, decor: w.decor)
+    }
+
+    /// A page's ink and notes onto the canvas, each note where its lines are in the file now.
+    private func loadPage(_ page: CodeNotePage) {
+        notes.load((try? PKDrawing(data: page.drawing)) ?? PKDrawing(), drafts: page.drafts)
+        if let shown, notes.follow(shown.text) { onDrafts?(notes.drafts); save() }
     }
 
     override func didMoveToWindow() {
@@ -221,8 +275,10 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     override func layoutSubviews() {
         super.layoutSubviews()
         if canvas.frame != bounds {
+            let wider = canvas.frame.width != bounds.width
             canvas.frame = bounds
-            sizePage()
+            // The page is at least as wide as the screen, with the cards at its right edge.
+            if wider { drawCode() } else { sizePage() }
         }
     }
 
@@ -246,7 +302,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
             keepCurrent(in: &book)
             book.current = id
             self.book = book
-            notes.load((try? PKDrawing(data: book.page.drawing)) ?? PKDrawing(), drafts: book.page.drafts)
+            loadPage(book.page)
             canvas.undoManager?.removeAllActions()
             onDrafts?(notes.drafts)
             publishPages()
@@ -281,7 +337,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         book.remove(id)
         self.book = book
         if wasCurrent {
-            notes.load((try? PKDrawing(data: book.page.drawing)) ?? PKDrawing(), drafts: book.page.drafts)
+            loadPage(book.page)
             canvas.undoManager?.removeAllActions()
             onDrafts?(notes.drafts)
         }
@@ -327,7 +383,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     func snapshot() -> UIImage? {
         guard let shown else { return nil }
         let ink = notes.drafts.filter { !$0.sent }.reduce(CGRect.null) { $0.union($1.bounds) }
-        let page = geometry.size(atLeast: CGSize(width: bounds.width, height: 0))
+        let page = pageSize
         var rect = CGRect(origin: .zero, size: page)
         if rect.height > 2200, !ink.isNull { rect = ink.insetBy(dx: 0, dy: -260).intersection(rect); rect.origin.x = 0; rect.size.width = page.width }
         guard let lines = geometry.lines(in: rect) else { return nil }
@@ -362,7 +418,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
 
     /// The canvas's content size is the page at its zoom (PencilKit scales the ink to match).
     private func sizePage() {
-        let z = canvas.zoomScale, page = geometry.size(atLeast: bounds.size)
+        let z = canvas.zoomScale, page = pageSize
         canvas.contentSize = CGSize(width: page.width * z, height: page.height * z)
         code.transform = CGAffineTransform(scaleX: z / drawnZoom, y: z / drawnZoom)
         code.layer.position = .zero
@@ -375,12 +431,18 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         drawnZoom = z
         let attributed = Self.page(shown.text, path: shown.path, lineCount: geometry.lineCount, gutter: geometry.gutter, zoom: z,
                                    dark: traitCollection.userInterfaceStyle == .dark)
-        let page = geometry.size(atLeast: bounds.size)
+        var page = geometry.size(atLeast: bounds.size)
+        if decor.hasCards { page.width = max(page.width, CodeDecorations.cardsX(geometry, pageWidth: 0) + CodeDecorations.cardWidth + CodeDecorations.cardGap) }
         anchors = geometry.anchors(path: shown.path, text: shown.text, width: page.width)
         code.transform = .identity
         code.layer.position = .zero
-        code.textContainer.size = CGSize(width: page.width * z, height: page.height * z)
         code.attributedText = attributed
+        decorations.lay(decor, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
+        decorations.select(selectedLine.map { geometry.rect(line: $0, width: page.width) }, zoom: z)
+        // Cards may run past the last line.
+        page.height = max(page.height, decorations.bottom() + CodePageGeometry.bottom)
+        pageSize = page
+        code.textContainer.size = CGSize(width: page.width * z, height: page.height * z)
         code.bounds = CGRect(x: 0, y: 0, width: page.width * z, height: page.height * z)
         code.frame.origin = .zero
         sizePage()
@@ -417,6 +479,59 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
             start = NSMaxRange(range)
         }
         return out
+    }
+
+    // MARK: - Fingers
+
+    /// A point in the canvas, on the page (zoom 1).
+    private func onPage(_ g: UIGestureRecognizer) -> CGPoint {
+        let p = g.location(in: canvas), z = max(canvas.zoomScale, 0.01)
+        return CGPoint(x: p.x / z, y: p.y / z)
+    }
+
+    @objc private func tapped(_ g: UITapGestureRecognizer) {
+        let p = onPage(g), now = CACurrentMediaTime()
+        defer { lastTap = (now, p) }
+        if let last = lastTap, now - last.time < 0.35, hypot(p.x - last.at.x, p.y - last.at.y) < 30 { return }
+        switch decorations.hit(at: p) {
+        case .notes(let ids): onMark?(ids)
+        case .diagram(let id, let element): onDiagram?(id, element)
+        case nil:
+            let line = geometry.line(at: p.y)
+            select(line == selectedLine ? nil : line)
+        }
+    }
+
+    /// Two taps zoom in on where they were, or back out to the whole width.
+    @objc private func doubleTapped(_ g: UITapGestureRecognizer) {
+        if canvas.zoomScale > 1.05 {
+            canvas.setZoomScale(1, animated: true)
+        } else {
+            let p = g.location(in: canvas), z: CGFloat = 2
+            let size = CGSize(width: canvas.bounds.width / z * canvas.zoomScale, height: canvas.bounds.height / z * canvas.zoomScale)
+            canvas.zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
+        }
+    }
+
+    private func select(_ line: Int?) {
+        selectedLine = line
+        let z = drawnZoom
+        decorations.select(line.map { geometry.rect(line: $0, width: pageSize.width) }, zoom: z)
+        onSelect?(line.flatMap { n in anchors.first { $0.line == n } })
+    }
+
+    func reveal(line: Int) {
+        guard shown != nil else { pendingReveal = line; return }
+        scrollTo(line: line)
+        select(min(max(line, 1), geometry.lineCount))
+    }
+
+    /// The line a third of the way down the screen.
+    func scrollTo(line: Int) {
+        guard shown != nil else { pendingReveal = line; return }
+        let z = canvas.zoomScale, r = geometry.rect(line: min(max(line, 1), geometry.lineCount), width: pageSize.width)
+        let maxY = max(0, canvas.contentSize.height - canvas.bounds.height)
+        canvas.setContentOffset(CGPoint(x: canvas.contentOffset.x, y: min(max(0, r.minY * z - canvas.bounds.height / 3), maxY)), animated: true)
     }
 
     // MARK: - Canvas
