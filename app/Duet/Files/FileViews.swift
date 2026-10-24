@@ -325,6 +325,15 @@ struct FileViewer: View {
         #endif
     }
 
+    /// The file is on the native page (iPad, with the setting on).
+    private var nativePage: Bool {
+        #if os(iOS)
+        pencil && nativeCode
+        #else
+        false
+        #endif
+    }
+
     private var panelShown: Bool { selected != nil || file?.truncated == true || drafts.contains { !$0.sent } }
 
     var body: some View {
@@ -402,25 +411,27 @@ struct FileViewer: View {
     private func marks(_ text: String) -> (marks: [Int: LineMark], unplaced: Int) {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let rank = ["open": 2, "answered": 1, "resolved": 0]
-        var at: [Int: (ids: [String], state: String, cards: [NoteCard])] = [:]
+        var at: [Int: (ids: [String], state: String, cards: [NoteCard], history: [NoteCard])] = [:]
         var unplaced = 0
         for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) {
             guard let l = a.lines?.first, let r = Reanchor.place(l, in: lines) else { unplaced += 1; continue }
-            var e = at[r.lowerBound] ?? ([], "resolved", [])
+            var e = at[r.lowerBound] ?? ([], "resolved", [], [])
             e.ids.append(a.id)
             // The most pressing wins: waiting, then answered, then resolved.
             if rank[a.status, default: 0] > rank[e.state, default: 0] { e.state = a.status }
-            // Not yet resolved: a card under the line, with the answer once there is one.
-            if a.status != "resolved" {
-                let asked = a.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                e.cards.append(NoteCard(id: a.id, question: asked.isEmpty ? "Your handwritten note" : asked,
-                                        answer: a.status == "answered" ? Self.gist(a.answer ?? "") : nil,
-                                        chip: a.answered ? AnswerChip.text(for: a) : nil,
-                                        waiting: a.answering == "Claude" ? "Claude is answering…" : a.answering != nil ? "A local model is reading the code…" : "Claude is answering…"))
-            }
+            // Not yet resolved: a card under the line, with the answer once there is one. Every note goes in the
+            // line's history.
+            let asked = a.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            let card = NoteCard(id: a.id, question: asked.isEmpty ? "Your handwritten note" : asked,
+                                answer: a.status != "open" && a.answer != nil ? Self.gist(a.answer ?? "") : nil,
+                                chip: a.answered ? AnswerChip.text(for: a) : nil,
+                                waiting: a.answering == "Claude" ? "Claude is answering…" : a.answering != nil ? "A local model is reading the code…" : "Claude is answering…",
+                                resolved: a.status == "resolved")
+            if a.status != "resolved" { e.cards.append(NoteCard(id: card.id, question: card.question, answer: a.status == "answered" ? card.answer : nil, chip: card.chip, waiting: card.waiting)) }
+            e.history.append(card)
             at[r.lowerBound] = e
         }
-        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards) }, unplaced)
+        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards, history: $0.history) }, unplaced)
     }
 
     /// The start of an answer for its card: its first paragraph of prose, after any "Let me look…" on the way there,
@@ -487,7 +498,7 @@ struct FileViewer: View {
                         askClaude: { model.askAbout("About \(Paths.short(path)):\(line) (`\(selected.label)`): ", compact: density == .compact) })
             }
             if pencil, drafts.contains(where: { !$0.sent }) {
-                NotesTray(drafts: $drafts) { Task { await send() } }
+                NotesTray(drafts: $drafts, squeezeSends: !nativePage) { Task { await send() } }
             }
         }
         .background(pencil ? AnyShapeStyle(.clear) : AnyShapeStyle(.bar))

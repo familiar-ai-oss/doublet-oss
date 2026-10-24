@@ -467,6 +467,8 @@ struct InkPanel<Content: View>: View {
 /// that ask for changes go to Claude in the conversation, to act on.
 struct NotesTray: View {
     @Binding var drafts: [DraftNote]
+    /// Whether a squeeze sends them (not on a native code page, where it does what Settings says).
+    var squeezeSends = true
     let onSend: () -> Void
     /// The notes one by one (to change what one means, or delete it): folded away until asked for, so the tray stays a
     /// single line over the page.
@@ -489,7 +491,7 @@ struct NotesTray: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityHint(showsNotes ? "Folds the notes away" : "Shows each note, to change what it means or delete it")
-                Text(questions ? "· answered here" : "· or squeeze the Pencil").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(questions ? "· answered here" : squeezeSends ? "· or squeeze the Pencil" : "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Button(questions ? "Ask" : "Send to Claude", systemImage: questions ? "questionmark.bubble" : "paperplane.fill", action: onSend)
                     .buttonStyle(.borderedProminent)
                     .accessibilityHint(questions ? "Each question becomes a thread on what it's written on, answered there"

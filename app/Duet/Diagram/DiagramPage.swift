@@ -573,6 +573,8 @@ struct LineMark: Equatable {
     let ids: [String]
     let state: String
     var cards: [NoteCard] = []
+    /// Every note on the line, resolved ones too, oldest first: the native page's history of what was asked here.
+    var history: [NoteCard] = []
 }
 
 /// A note under the line it was written on, as in a code review: what you asked, and the start of Claude's answer
@@ -586,6 +588,7 @@ struct NoteCard: Equatable {
     var chip: String? = nil
     /// While it's being answered: by whom.
     var waiting: String = "Claude is answering…"
+    var resolved = false
 }
 
 /// A diagram that explains lines of a file, as the file shows it: a stripe beside the lines it explains, a mark on the

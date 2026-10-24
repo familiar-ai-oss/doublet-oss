@@ -136,6 +136,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
     private var pageSize = CGSize(width: 1, height: 1)
     /// The picked line.
     private var selectedLine: Int?
+    /// The line whose notes' history is open under it.
+    private var openLine: Int?
     /// A line to show once the file is up.
     private var pendingReveal: Int?
     /// The palette's tool now and the one before it, and when it last changed: for the Pencil's squeeze and double-tap.
@@ -528,7 +530,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         code.transform = .identity
         code.layer.position = .zero
         code.attributedText = attributed
-        decorations.lay(decor, cards: showsCards, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
+        decorations.lay(decor, cards: showsCards, open: openLine, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: page.width) }, zoom: z)
         // Cards may run past the last line.
         page.height = max(page.height, decorations.bottom() + geometry.bottom)
@@ -603,9 +605,12 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         defer { lastTap = (now, p) }
         if let last = lastTap, now - last.time < 0.35, hypot(p.x - last.at.x, p.y - last.at.y) < 30 { return }
         switch decorations.hit(at: p) {
-        case .notes(let ids): onMark?(ids)
+        case .history(let n): openHistory(n == openLine ? nil : n)
+        case .notes(let ids): openHistory(nil); onMark?(ids)
         case .diagram(let id, let element): onDiagram?(id, element)
         case nil:
+            // A tap away from an open history closes it, and nothing more.
+            if openLine != nil { openHistory(nil); return }
             let line = geometry.line(at: p.y)
             select(line == selectedLine ? nil : line)
         }
@@ -620,6 +625,15 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
             let size = CGSize(width: canvas.bounds.width / z * canvas.zoomScale, height: canvas.bounds.height / z * canvas.zoomScale)
             canvas.zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
         }
+    }
+
+    /// Open a line's history under it (nil: close it).
+    private func openHistory(_ line: Int?) {
+        guard line != openLine else { return }
+        openLine = line
+        // Only the decorations change: the code stays as drawn.
+        decorations.lay(decor, cards: showsCards, open: openLine, geometry: geometry, pageWidth: pageSize.width, zoom: drawnZoom, in: code)
+        decorations.select(selectedLine.map { geometry.rect(line: $0, width: pageSize.width) }, zoom: drawnZoom)
     }
 
     private func select(_ line: Int?) {
