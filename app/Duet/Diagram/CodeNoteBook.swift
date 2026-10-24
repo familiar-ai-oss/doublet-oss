@@ -14,6 +14,8 @@ struct CodeNotePage: Codable, Identifiable, Equatable {
 struct CodeNoteBook: Codable, Equatable {
     var pages: [CodeNotePage]
     var current: UUID
+    /// The line height the ink was written for (nil: 20, the first native pages').
+    var lineHeight: CGFloat?
 
     static let earlierName = "Earlier notes"
 
@@ -85,12 +87,36 @@ struct CodeNoteBook: Codable, Equatable {
             return book
         }
         var book = CodeNoteBook()
+        book.lineHeight = geometry.lineHeight
         if let data = try? Data(contentsOf: url(key, in: folder)), let old = try? JSONDecoder().decode(WebSaved.self, from: data),
            let drawing = try? PKDrawing(data: old.drawing), let earlier = earlierNotes(drawing, old.drafts, geometry: geometry) {
             book.pages.insert(earlier, at: 0)
             book.current = earlier.id
         }
         return book
+    }
+
+    /// The page is drawn at another size (the user's text size changed): every page's ink scales with it, so each
+    /// note stays on its lines.
+    mutating func fit(lineHeight new: CGFloat) {
+        let old = lineHeight ?? 20
+        lineHeight = new
+        guard abs(new - old) > 0.01 else { return }
+        let t = CGAffineTransform(scaleX: new / old, y: new / old)
+        for i in pages.indices {
+            guard let drawing = try? PKDrawing(data: pages[i].drawing) else { continue }
+            var renamed: [UUID: UUID] = [:]
+            let strokes = drawing.strokes.map { s in
+                let moved = PKStroke(ink: s.ink, path: s.path, transform: s.transform.concatenating(t), mask: s.mask, randomSeed: s.randomSeed)
+                renamed[s.id] = moved.id
+                return moved
+            }
+            pages[i].drawing = PKDrawing(strokes: strokes).dataRepresentation()
+            for j in pages[i].drafts.indices {
+                pages[i].drafts[j].strokeIDs = Set(pages[i].drafts[j].strokeIDs.map { renamed[$0] ?? $0 })
+                pages[i].drafts[j].bounds = pages[i].drafts[j].bounds.applying(t)
+            }
+        }
     }
 
     func save(key: String, folder: URL? = folder) {

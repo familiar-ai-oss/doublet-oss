@@ -72,7 +72,7 @@ final class CodeDecorations {
         }
         let purple = UIColor(red: 0x8b / 255, green: 0x5c / 255, blue: 0xf6 / 255, alpha: 1)
         for n in d.peeks.reduce(into: Set<Int>(), { $0.formUnion($1.lines) }) where n <= g.lineCount {
-            band(CGRect(x: g.codeX - 6, y: g.rect(line: n, width: width).minY, width: 2, height: CodePageGeometry.lineHeight), purple.withAlphaComponent(0.75))
+            band(CGRect(x: g.codeX - 6, y: g.rect(line: n, width: width).minY, width: 2, height: g.lineHeight), purple.withAlphaComponent(0.75))
         }
 
         // In the gutter, before the number: a note's bubble, else a diagram element's ◆.

@@ -101,7 +101,7 @@ final class InkNoteTaker {
     /// The file changed under its notes: each note's lines are found again by their code, and its ink moves the same
     /// number of lines. Notes whose code is gone stay where they were. Whether anything moved.
     @discardableResult
-    func follow(_ text: String) -> Bool {
+    func follow(_ text: String, lineHeight: CGFloat) -> Bool {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         var drawing = canvas.drawing
         var renamed: [UUID: UUID] = [:]
@@ -109,7 +109,7 @@ final class InkNoteTaker {
             guard let tagged = drafts[i].note.lines, let first = tagged.first, let now = Reanchor.place(first, in: lines) else { continue }
             let shift = now.lowerBound - first.start
             guard shift != 0 else { continue }
-            let t = CGAffineTransform(translationX: 0, y: CGFloat(shift) * CodePageGeometry.lineHeight)
+            let t = CGAffineTransform(translationX: 0, y: CGFloat(shift) * lineHeight)
             for j in drawing.strokes.indices where drafts[i].strokeIDs.contains(drawing.strokes[j].id) {
                 // A moved stroke gets a new id: the canvas redraws strokes it hasn't seen, not ones it has that moved.
                 let s = drawing.strokes[j]

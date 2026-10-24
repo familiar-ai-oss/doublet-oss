@@ -153,8 +153,11 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     /// SwiftUI's handle, for the toolbar's page menu.
     weak var controller: NativeInkController?
 
-    private static var font: UIFont { .monospacedSystemFont(ofSize: CodePageGeometry.fontSize, weight: .regular) }
-    private static var advance: CGFloat { ("0" as NSString).size(withAttributes: [.font: font]).width }
+    /// The code's size: the page's base size, scaled by the user's text size (Settings › Display & Brightness).
+    private var fontSize: CGFloat { UIFontMetrics(forTextStyle: .body).scaledValue(for: CodePageGeometry.baseFontSize, compatibleWith: traitCollection) }
+    private func advance(_ size: CGFloat) -> CGFloat {
+        ("0" as NSString).size(withAttributes: [.font: UIFont.monospacedSystemFont(ofSize: size, weight: .regular)]).width
+    }
 
     init(key: String) {
         self.key = key
@@ -197,6 +200,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         // Strokes are ink, never text input.
         for v in [canvas, code] as [UIView] { v.addInteraction(UIScribbleInteraction(delegate: self)) }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawCode() }
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in self.resize() }
         // Fingers pick: one tap picks a line or opens what's tapped, two zoom in or back out. (The Pencil only draws.)
         let direct = [NSNumber(value: UITouch.TouchType.direct.rawValue)]
         let doubleTap = UITapGestureRecognizer(target: self, action: #selector(doubleTapped(_:)))
@@ -225,18 +229,35 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         let first = shown?.path != path, changed = shown?.text != text
         shown = (path, text)
         self.decor = decor
-        geometry = CodePageGeometry(text: text, advance: Self.advance)
+        let size = fontSize
+        geometry = CodePageGeometry(text: text, advance: advance(size), fontSize: size)
         if first {
-            let book = CodeNoteBook.load(key: key, geometry: geometry)
+            var book = CodeNoteBook.load(key: key, geometry: geometry)
+            // Written at another text size: the ink grows or shrinks with the page, so it stays on its lines.
+            book.fit(lineHeight: geometry.lineHeight)
             self.book = book
             loadPage(book.page)
             publishPages()
         } else if changed {
             // The file changed under its notes: each note's ink moves with its lines.
-            if notes.follow(text) { onDrafts?(notes.drafts); save() }
+            if notes.follow(text, lineHeight: geometry.lineHeight) { onDrafts?(notes.drafts); save() }
         }
         drawCode()
         if let line = pendingReveal { pendingReveal = nil; reveal(line: line) }
+    }
+
+    /// The user's text size changed: the page is laid out again at the new size, and its ink scaled to match.
+    private func resize() {
+        guard let shown, var book, abs(fontSize - geometry.fontSize) > 0.01 else { return }
+        guard !penDown, !notes.busy else { return }
+        keepCurrent(in: &book)
+        geometry = CodePageGeometry(text: shown.text, advance: advance(fontSize), fontSize: fontSize)
+        book.fit(lineHeight: geometry.lineHeight)
+        self.book = book
+        loadPage(book.page)
+        onDrafts?(notes.drafts)
+        drawCode()
+        save()
     }
 
     private func showWaiting() {
@@ -247,7 +268,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     /// A page's ink and notes onto the canvas, each note where its lines are in the file now.
     private func loadPage(_ page: CodeNotePage) {
         notes.load((try? PKDrawing(data: page.drawing)) ?? PKDrawing(), drafts: page.drafts)
-        if let shown, notes.follow(shown.text) { onDrafts?(notes.drafts); save() }
+        if let shown, notes.follow(shown.text, lineHeight: geometry.lineHeight) { onDrafts?(notes.drafts); save() }
     }
 
     override func didMoveToWindow() {
@@ -387,7 +408,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         var rect = CGRect(origin: .zero, size: page)
         if rect.height > 2200, !ink.isNull { rect = ink.insetBy(dx: 0, dy: -260).intersection(rect); rect.origin.x = 0; rect.size.width = page.width }
         guard let lines = geometry.lines(in: rect) else { return nil }
-        let text = Self.page(shown.text, path: shown.path, lineCount: geometry.lineCount, gutter: geometry.gutter, zoom: 1,
+        let text = Self.page(shown.text, path: shown.path, geometry: geometry, zoom: 1,
                              dark: false) as NSAttributedString
         let ns = text.string as NSString
         let drawing = canvas.drawing.image(from: rect, scale: 1)
@@ -429,7 +450,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         guard let shown else { return }
         let z = canvas.zoomScale
         drawnZoom = z
-        let attributed = Self.page(shown.text, path: shown.path, lineCount: geometry.lineCount, gutter: geometry.gutter, zoom: z,
+        let attributed = Self.page(shown.text, path: shown.path, geometry: geometry, zoom: z,
                                    dark: traitCollection.userInterfaceStyle == .dark)
         var page = geometry.size(atLeast: bounds.size)
         if decor.hasCards { page.width = max(page.width, CodeDecorations.cardsX(geometry, pageWidth: 0) + CodeDecorations.cardWidth + CodeDecorations.cardGap) }
@@ -440,7 +461,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         decorations.lay(decor, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: page.width) }, zoom: z)
         // Cards may run past the last line.
-        page.height = max(page.height, decorations.bottom() + CodePageGeometry.bottom)
+        page.height = max(page.height, decorations.bottom() + geometry.bottom)
         pageSize = page
         code.textContainer.size = CGSize(width: page.width * z, height: page.height * z)
         code.bounds = CGRect(x: 0, y: 0, width: page.width * z, height: page.height * z)
@@ -449,22 +470,23 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     }
 
     /// The file's text as the page shows it, at a zoom: each line led by its number.
-    static func page(_ text: String, path: String, lineCount: Int, gutter: Int, zoom: CGFloat, dark: Bool) -> NSAttributedString {
-        let font = UIFont.monospacedSystemFont(ofSize: CodePageGeometry.fontSize * zoom, weight: .regular)
+    static func page(_ text: String, path: String, geometry g: CodePageGeometry, zoom: CGFloat, dark: Bool) -> NSAttributedString {
+        let lineCount = g.lineCount, gutter = g.gutter
+        let font = UIFont.monospacedSystemFont(ofSize: g.fontSize * zoom, weight: .regular)
         let para = NSMutableParagraphStyle()
-        para.minimumLineHeight = CodePageGeometry.lineHeight * zoom
-        para.maximumLineHeight = CodePageGeometry.lineHeight * zoom
+        para.minimumLineHeight = g.lineHeight * zoom
+        para.maximumLineHeight = g.lineHeight * zoom
         para.lineBreakMode = .byClipping
-        para.firstLineHeadIndent = CodePageGeometry.left * zoom
-        para.headIndent = CodePageGeometry.left * zoom
+        para.firstLineHeadIndent = g.left * zoom
+        para.headIndent = g.left * zoom
         let number: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.tertiaryLabel, .paragraphStyle: para]
         // Coloured as the web page colours it, then cut into lines, each led by its number.
         let styled = CodeSyntax.attributed(text, language: CodeHTML.language(path: path, text: text), dark: dark, font: font)
         let out = NSMutableAttributedString()
         // A top margin: the first line sits below the page's edge.
         let top = NSMutableParagraphStyle()
-        top.minimumLineHeight = CodePageGeometry.top * zoom
-        top.maximumLineHeight = CodePageGeometry.top * zoom
+        top.minimumLineHeight = g.top * zoom
+        top.maximumLineHeight = g.top * zoom
         out.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: top]))
         let ns = text as NSString
         var start = 0

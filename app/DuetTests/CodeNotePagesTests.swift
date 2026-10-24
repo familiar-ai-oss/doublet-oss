@@ -14,8 +14,8 @@ struct CodeNotePagesTests {
     @Test func linesSitAtFixedHeights() {
         #expect(geometry.lineCount == 30) // the final newline doesn't start a line
         #expect(geometry.gutter == 4)
-        #expect(geometry.rect(line: 1, width: 500).minY == CodePageGeometry.top)
-        #expect(geometry.rect(line: 10, width: 500).minY == CodePageGeometry.top + 9 * CodePageGeometry.lineHeight)
+        #expect(geometry.rect(line: 1, width: 500).minY == geometry.top)
+        #expect(geometry.rect(line: 10, width: 500).minY == geometry.top + 9 * geometry.lineHeight)
         #expect(geometry.line(at: geometry.rect(line: 7, width: 1).midY) == 7)
         #expect(geometry.line(at: 0) == nil)
         #expect(geometry.line(at: 10_000) == nil)
@@ -34,6 +34,28 @@ struct CodeNotePagesTests {
         #expect(shape.shape == .cross)
         let note = InkTagger.note(id: "n", shape: shape, text: nil, color: .other, anchors: anchors, diff: true)
         #expect(note.lines?.map(\.start) == [12])
+    }
+
+    @Test func theCodeIsLargerThanAnEditorsAndLinesFollowItsSize() {
+        #expect(geometry.fontSize == 16 && geometry.lineHeight == 24)
+        let larger = CodePageGeometry(text: Self.text, advance: 10, fontSize: 20)
+        #expect(larger.lineHeight == 30)
+        #expect(larger.rect(line: 5, width: 1).minY > geometry.rect(line: 5, width: 1).minY)
+    }
+
+    @Test func inkScalesWithTheTextSize() throws {
+        let stroke = Self.stroke(at: CGPoint(x: 100, y: 200))
+        let draft = DraftNote(note: InkNote(id: "n", intent: .comment), strokeIDs: [stroke.id], bounds: stroke.renderBounds)
+        var book = CodeNoteBook(pages: [CodeNotePage(name: "Note 1", drawing: PKDrawing(strokes: [stroke]).dataRepresentation(), drafts: [draft])])
+        book.lineHeight = 20
+        book.fit(lineHeight: 30)
+        let moved = try PKDrawing(data: book.page.drawing).strokes
+        #expect(abs(moved[0].renderBounds.midY - stroke.renderBounds.midY * 1.5) < 1)
+        #expect(book.page.drafts[0].strokeIDs == [moved[0].id])
+        #expect(book.lineHeight == 30)
+        // Already that size: nothing moves.
+        book.fit(lineHeight: 30)
+        #expect(try PKDrawing(data: book.page.drawing).strokes.map(\.id) == moved.map(\.id))
     }
 
     @Test func pagesAreNamedAddedRenamedAndRemoved() {
