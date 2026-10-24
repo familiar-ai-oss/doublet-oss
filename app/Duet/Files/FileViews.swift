@@ -310,8 +310,11 @@ struct FileViewer: View {
     #if os(iOS)
     @State private var ink = InkController()
     @State private var nativeInk = NativeInkController()
-    /// A prototype: code drawn natively under a canvas that is the page, as in Notes (no notes or saving yet).
+    /// Code drawn natively under a canvas that is the page, as in Notes (being built; the web page otherwise).
     @AppStorage("nativeCodePage") private var nativeCode = false
+    /// The note page being renamed, and its new name.
+    @State private var renaming: UUID?
+    @State private var newName = ""
     #endif
 
     private var pencil: Bool {
@@ -455,7 +458,7 @@ struct FileViewer: View {
                                        marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? ""))
         #if os(iOS)
         if pencil, nativeCode {
-            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk)
+            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts)
         } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
@@ -502,6 +505,7 @@ struct FileViewer: View {
         }
         #if os(iOS)
         if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { nativeCode ? nativeInk.toggleTools() : ink.toggleTools() } }
+        if pencil, nativeCode { notePages }
         #endif
         Button("Side Chat", systemImage: "bubble.left.and.bubble.right") { model.openSideChat(about: .file(path: path)) }
             .help("Ask a quick question about this file, beside the conversation (⌘⇧K)")
@@ -522,6 +526,32 @@ struct FileViewer: View {
             #endif
         } label: { Label("More", systemImage: "ellipsis.circle") }
     }
+
+    #if os(iOS)
+    /// The file's note pages: layers of ink, one shown and written on at a time, each with its own notes.
+    @ViewBuilder private var notePages: some View {
+        Menu {
+            Picker("Note Page", selection: Binding(get: { nativeInk.current }, set: { if let id = $0 { nativeInk.show(page: id) } })) {
+                ForEach(nativeInk.pages) { Text($0.name).tag(Optional($0.id)) }
+            }
+            Divider()
+            Button("New Note Page", systemImage: "plus") { nativeInk.addPage() }
+            if let id = nativeInk.current {
+                Button("Rename…", systemImage: "pencil") { newName = nativeInk.currentName; renaming = id }
+                if nativeInk.pages.count > 1 {
+                    Button("Delete “\(nativeInk.currentName)”", systemImage: "trash", role: .destructive) { nativeInk.remove(id) }
+                }
+            }
+        } label: { Label(nativeInk.currentName, systemImage: "square.stack") }
+            .labelStyle(.titleAndIcon)
+            .help("Pages of notes on this file: each its own ink, one shown at a time")
+            .alert("Rename Note Page", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("Name", text: $newName)
+                Button("Rename") { if let id = renaming { nativeInk.rename(id, to: newName) }; renaming = nil }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            }
+    }
+    #endif
 
     /// The first line of each run of changed lines.
     private func changeStarts(_ lines: [Int]) -> [Int] {
@@ -548,11 +578,13 @@ struct FileViewer: View {
 
     private func send() async {
         #if os(iOS)
-        await ink.finishNote()
+        if nativeCode { await nativeInk.finishNote() } else { await ink.finishNote() }
         let pending = drafts.filter { !$0.sent }
-        guard !pending.isEmpty else { ink.toggleTools(); return }
-        let image = await ink.snapshot()?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
-        model.send(.notes(surface: .file(path: path), items: await ink.items(pending), image: image, imageType: image == nil ? nil : "image/jpeg"))
+        guard !pending.isEmpty else { nativeCode ? nativeInk.toggleTools() : ink.toggleTools(); return }
+        let picture = nativeCode ? await nativeInk.snapshot() : await ink.snapshot()
+        let image = picture?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
+        let items = nativeCode ? await nativeInk.items(pending) : await ink.items(pending)
+        model.send(.notes(surface: .file(path: path), items: items, image: image, imageType: image == nil ? nil : "image/jpeg"))
         for i in drafts.indices where !drafts[i].sent { drafts[i].sent = true }
         sent += 1
         #endif
