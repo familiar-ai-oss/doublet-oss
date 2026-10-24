@@ -17,6 +17,20 @@ final class InkNoteTaker {
     var onChange: (() -> Void)?
     /// A note was tagged: a tap in the hand on Apple Pencil Pro, at this place on the page.
     var onTagged: ((CGPoint) -> Void)?
+    /// A native code page: the page's lines, so notes are tagged by their mark first (`CodeTagger`) and grouped tightly.
+    var code: (path: String, geometry: () -> CodePageGeometry, lines: () -> [Substring])?
+    /// A note that's surely a question, read and tagged: ask it now, with no confirming.
+    var onConfidentQuestion: ((String) -> Void)?
+    /// A question asked a moment ago, crossed out: take it back.
+    var onCancel: ((String) -> Void)?
+    /// Questions asked from here, and when: a cross over one soon after takes it back.
+    private var asked: [String: Date] = [:]
+    /// Each note's mark, for deciding once its words are read.
+    private var marks: [String: (shape: InkShape, strike: Bool)] = [:]
+    /// Questions whose target is shown plainly, not just outlined: a fallback anchor, or a question only the model heard.
+    private(set) var shown: Set<String> = []
+    /// When the last stroke ended (a native code page groups by time as well as place).
+    private var lastStrokeEnd = Date.distantPast
     private(set) var drafts: [DraftNote] = []
     private var known: Set<UUID> = []
     private var group: [UUID] = []
@@ -67,15 +81,19 @@ final class InkNoteTaker {
         guard !added.isEmpty else { return }
         known.formUnion(added)
         if let new = bounds(of: added) {
+            let strokes = canvas.drawing.strokes.filter { added.contains($0.id) }
+            let started = strokes.map(\.path.creationDate).min() ?? Date()
+            let ended = strokes.map { $0.path.creationDate.addingTimeInterval($0.path.last?.timeOffset ?? 0) }.max() ?? Date()
+            defer { lastStrokeEnd = ended }
             // A stroke clearly away from the note being written closes it; this one starts or carries on another.
-            if !group.isEmpty, !continues(Set(group), with: new, across: 5, down: 2.5) {
+            if !group.isEmpty, !joins(Set(group), with: new, at: started) {
                 let finished = group, into = reopened
                 group = []
                 reopened = nil
                 Task { await self.finish(finished, into: into) }
             }
             // A stroke beside a note not yet sent carries it on, however long the pause, and it's read again whole.
-            if group.isEmpty, let d = drafts.last(where: { !$0.sent && continues($0.strokeIDs, with: new) }) {
+            if group.isEmpty, let d = drafts.last(where: { !$0.sent && (code == nil ? continues($0.strokeIDs, with: new) : joins($0.strokeIDs, with: new, at: .distantPast)) }) {
                 reopened = d.id
                 group = ids.filter { d.strokeIDs.contains($0) && !added.contains($0) }
             }
@@ -116,7 +134,10 @@ final class InkNoteTaker {
             let was = drafts[i].tagged?[Self.lineKey]?.y ?? g.top + CGFloat(first.start - 1) * g.lineHeight
             let top = g.rect(line: now.lowerBound, width: 0).minY
             drafts[i].tagged = [Self.lineKey: CGPoint(x: 0, y: top)]
-            if shift != 0 { drafts[i].note.lines = tagged.map { InkLines(file: $0.file, start: $0.start + shift, end: $0.end + shift, code: $0.code) } }
+            if shift != 0 {
+                drafts[i].note.lines = tagged.map { InkLines(file: $0.file, start: $0.start + shift, end: $0.end + shift, code: $0.code) }
+                drafts[i].span = drafts[i].span?.shifted(by: shift)
+            }
             guard abs(top - was) > 0.5 else { continue }
             let t = CGAffineTransform(translationX: 0, y: top - was)
             for j in drawing.strokes.indices where drafts[i].strokeIDs.contains(drawing.strokes[j].id) {
@@ -192,10 +213,27 @@ final class InkNoteTaker {
             text = await recognizer.recognizedText(strokeIDs: textIDs)
         }
         let anchors = anchors()
-        let note = InkTagger.note(id: reopened ?? UUID().uuidString, shape: shape, text: text, color: InkSurfaceView.colorName(strokes), anchors: anchors,
-                                  diff: true, letterHeight: InkGeometry.letterHeight(strokes.map(\.renderBounds)))
         let box = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }
+        let id = reopened ?? UUID().uuidString
+        let note: InkNote
+        var span: CodeSpan?
+        if let code {
+            // An X over a question asked a moment ago takes it back, and both go.
+            if shape.shape == .cross, textIDs.isEmpty,
+               let q = drafts.first(where: { d in d.sent && asked[d.id].map { Date().timeIntervalSince($0) < 15 } == true && d.bounds.insetBy(dx: -8, dy: -8).intersects(shape.bounds) }) {
+                cancel(q, with: Set(ids))
+                return
+            }
+            let tagged = CodeTagger.note(id: id, shape: shape, text: text, color: InkSurfaceView.colorName(strokes), path: code.path, geometry: code.geometry(), lines: code.lines())
+            note = tagged.note
+            span = tagged.span
+            marks[id] = (shape.shape, tagged.strike)
+        } else {
+            note = InkTagger.note(id: id, shape: shape, text: text, color: InkSurfaceView.colorName(strokes), anchors: anchors,
+                                  diff: true, letterHeight: InkGeometry.letterHeight(strokes.map(\.renderBounds)))
+        }
         var draft = DraftNote(note: note, strokeIDs: Set(ids), bounds: box)
+        draft.span = span
         // Where its line is, so its ink can follow it when the page is laid out again.
         if let line = note.lines?.first?.start, let a = anchors.first(where: { $0.line == line }) { draft.tagged = [Self.lineKey: CGPoint(x: 0, y: a.rect.minY)] }
         let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -217,6 +255,46 @@ final class InkNoteTaker {
             onTagged?(CGPoint(x: box.midX, y: box.midY))
         }
         onChange?()
+        // No words to read: decided now (a mark alone is never a question).
+        if raw.isEmpty { decide(draft.id) }
+    }
+
+    /// Whether a note, once read, is a question to ask now (`CodeDecision`): it's told the page, which sends it.
+    private func decide(_ id: String) {
+        guard code != nil, let i = drafts.firstIndex(where: { $0.id == id }), !drafts[i].sent, let mark = marks[id] else { return }
+        let d = drafts[i]
+        guard case .ask(let words, let plain) = CodeDecision.of(shape: mark.shape, strike: mark.strike, raw: d.raw, tidied: d.reading?.text,
+                                                         kind: d.reading?.kind, span: d.span) else { return }
+        drafts[i].note.intent = .question
+        drafts[i].note.text = words
+        asked[id] = Date()
+        if plain || d.span?.isFallback == true { shown.insert(id) }
+        onChange?()
+        onConfidentQuestion?(id)
+    }
+
+    /// A question taken back: its strokes and the cross over it go, and the page is told.
+    private func cancel(_ q: DraftNote, with cross: Set<UUID>) {
+        let gone = q.strokeIDs.union(cross)
+        var d = canvas.drawing
+        d.strokes.removeAll { gone.contains($0.id) }
+        known.subtract(gone)
+        drafts.removeAll { $0.id == q.id }
+        asked[q.id] = nil
+        canvas.drawing = d
+        onChange?()
+        onCancel?(q.id)
+    }
+
+    /// Take back a question asked a moment ago (from its pill): its ink goes too.
+    func cancel(_ id: String) {
+        guard let q = drafts.first(where: { $0.id == id }) else { return }
+        cancel(q, with: [])
+    }
+
+    /// Whether a question was asked from here in the last few seconds (it can still be taken back).
+    func justAsked(_ id: String, within seconds: TimeInterval = 15) -> Bool {
+        asked[id].map { Date().timeIntervalSince($0) < seconds } ?? false
     }
 
     /// What a note is about, for reading it: its code lines in words, and the names in them.
@@ -239,7 +317,17 @@ final class InkNoteTaker {
             self.drafts[i].reading = reading
             self.drafts[i].note = HandwritingReader.apply(reading, to: d.note, color: InkColorName(rawValue: d.note.color ?? "") ?? .other, chosen: d.chosen == true)
             self.onChange?()
+            self.decide(id)
         }
+    }
+
+    /// Whether a stroke started at `start` carries on these strokes' note: by time and a tight margin on a code page
+    /// (`CodeGrouping`), else by how far it is, in letter heights.
+    private func joins(_ ids: Set<UUID>, with new: CGRect, at start: Date) -> Bool {
+        guard code != nil else { return continues(ids, with: new, across: 5, down: 2.5) }
+        let rects = canvas.drawing.strokes.filter { ids.contains($0.id) }.map(\.renderBounds)
+        guard let note = rects.reduce(nil, { $0?.union($1) ?? $1 }) else { return false }
+        return CodeGrouping.joins(note: note, letterHeight: InkGeometry.letterHeight(rects), lastEnd: lastStrokeEnd, stroke: new, start: start)
     }
 
     private func continues(_ ids: Set<UUID>, with new: CGRect, across: CGFloat = 3, down: CGFloat = 1.5) -> Bool {

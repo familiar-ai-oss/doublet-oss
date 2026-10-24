@@ -32,7 +32,7 @@ final class NativeInkController {
     func scrollTo(line: Int) { view?.scrollTo(line: line) }
 
     func finishNote() async { await view?.notes.finishGroup() }
-    func snapshot() async -> UIImage? { view?.snapshot() }
+    func snapshot(only ids: Set<String>? = nil) async -> UIImage? { view?.snapshot(only: ids) }
 
     /// The notes to send, each with a picture of its handwriting. Readings on their way get a moment (at most 0.8 s).
     func items(_ drafts: [DraftNote]) async -> [InkNote] {
@@ -65,6 +65,10 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
     var onMark: ([String]) -> Void = { _ in }
     /// A diagram's mark or card: open it, with that element picked.
     var onDiagram: (String, String?) -> Void = { _, _ in }
+    /// A question written with the Pencil, read and tagged: send it now (just it).
+    var onQuestion: (String) -> Void = { _ in }
+    /// A question taken back: delete it.
+    var onCancel: (String) -> Void = { _ in }
 
     /// Whether SwiftUI has heard of the notes the view restored. Until then its (empty) list mustn't replace them.
     final class Coordinator { var synced = false }
@@ -96,6 +100,8 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
         v.onSelect = onSelect
         v.onMark = onMark
         v.onDiagram = onDiagram
+        v.onQuestion = onQuestion
+        v.onCancel = onCancel
     }
 }
 
@@ -163,6 +169,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
     var onSelect: ((InkAnchor?) -> Void)?
     var onMark: (([String]) -> Void)?
     var onDiagram: ((String, String?) -> Void)?
+    var onQuestion: ((String) -> Void)?
+    var onCancel: ((String) -> Void)?
     /// SwiftUI's handle, for the toolbar's page menu.
     weak var controller: NativeInkController?
 
@@ -227,6 +235,11 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         tap.allowedTouchTypes = direct
         canvas.addGestureRecognizer(tap)
         notes.anchors = { [weak self] in self?.anchors ?? [] }
+        // Tagged by the mark first, on the page's own lines.
+        notes.code = (path: "", geometry: { [weak self] in self?.geometry ?? CodePageGeometry(lineCount: 1, columns: 1, advance: 8) },
+                      lines: { [weak self] in (self?.layoutText ?? "").split(separator: "\n", omittingEmptySubsequences: false) })
+        notes.onConfidentQuestion = { [weak self] id in self?.onQuestion?(id) }
+        notes.onCancel = { [weak self] id in self?.onCancel?(id) }
         notes.onChange = { [weak self] in self?.notesChanged() }
         notes.onTagged = { [weak self] p in
             guard let self else { return }
@@ -243,6 +256,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         waiting = nil
         let first = shown?.path != path
         shown = (path, text)
+        notes.code?.path = path
         self.decor = decor
         layoutText = CodePageGeometry.expanded(text)
         if first {
@@ -456,6 +470,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
 
     private func notesChanged() {
         onDrafts?(notes.drafts)
+        // A note just read or tagged: its snap shows (after the Pencil lifted; notes change only then).
+        if shown != nil { relay(width: pageSize.width, zoom: drawnZoom) }
         save()
         showWaiting()
     }
@@ -474,9 +490,9 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
     }
 
     /// The note's picture: the code and ink around the notes being sent, as on the page at zoom 1.
-    func snapshot() -> UIImage? {
+    func snapshot(only ids: Set<String>? = nil) -> UIImage? {
         guard let shown else { return nil }
-        let ink = notes.drafts.filter { !$0.sent }.reduce(CGRect.null) { $0.union($1.bounds) }
+        let ink = notes.drafts.filter { !$0.sent && (ids?.contains($0.id) ?? true) }.reduce(CGRect.null) { $0.union($1.bounds) }
         let page = pageSize
         var rect = CGRect(origin: .zero, size: page)
         if rect.height > 2200, !ink.isNull { rect = ink.insetBy(dx: 0, dy: -260).intersection(rect); rect.origin.x = 0; rect.size.width = page.width }
@@ -530,7 +546,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         code.transform = .identity
         code.layer.position = .zero
         code.attributedText = attributed
-        decorations.lay(decor, cards: showsCards, open: openLine, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
+        relay(width: page.width, zoom: z)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: page.width) }, zoom: z)
         // Cards may run past the last line.
         page.height = max(page.height, decorations.bottom() + geometry.bottom)
@@ -607,6 +623,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         switch decorations.hit(at: p) {
         case .history(let n): openHistory(n == openLine ? nil : n)
         case .notes(let ids): openHistory(nil); onMark?(ids)
+        case .cancel(let id): openHistory(nil); notes.cancel(id)
         case .diagram(let id, let element): onDiagram?(id, element)
         case nil:
             // A tap away from an open history closes it, and nothing more.
@@ -632,8 +649,16 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         guard line != openLine else { return }
         openLine = line
         // Only the decorations change: the code stays as drawn.
-        decorations.lay(decor, cards: showsCards, open: openLine, geometry: geometry, pageWidth: pageSize.width, zoom: drawnZoom, in: code)
+        relay(width: pageSize.width, zoom: drawnZoom)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: pageSize.width) }, zoom: drawnZoom)
+    }
+
+    /// The decorations laid out again: with what each note's mark was snapped to, and the questions that can still
+    /// be taken back.
+    private func relay(width: CGFloat, zoom: CGFloat) {
+        let snapped = notes.drafts.compactMap { d in d.span.map { (rects: $0.rects(in: geometry), shown: notes.shown.contains(d.id) || $0.isFallback && d.note.intent == .question) } }
+        let cancellable = Set(notes.drafts.map(\.id).filter { notes.justAsked($0) })
+        decorations.lay(decor, cards: showsCards, open: openLine, snapped: snapped, cancellable: cancellable, geometry: geometry, pageWidth: width, zoom: zoom, in: code)
     }
 
     private func select(_ line: Int?) {
@@ -661,12 +686,14 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
         penDown = true
+        decorations.pausePulses(true)
         // Back out if it was put away with Pencil Tools.
         if let picker, !picker.isVisible { picker.setVisible(true, forFirstResponder: canvas) }
     }
 
     func canvasViewDidEndUsingTool(_ canvasView: PKCanvasView) {
         penDown = false
+        decorations.pausePulses(false)
         // The drawing hears of the stroke just after this; a waiting version of the file shows once the note allows.
         Task {
             try? await Task.sleep(for: .milliseconds(150))

@@ -18,6 +18,8 @@ struct DraftNote: Identifiable, Equatable, Codable {
     var raw: String?
     /// Its kind was picked from the menu or the squeeze palette: a reading doesn't change it.
     var chosen: Bool?
+    /// On a native code page: what its mark picked out, and how surely.
+    var span: CodeSpan?
     var id: String { note.id }
 }
 
@@ -541,7 +543,9 @@ struct PickBar: View {
     var monospaced = false
     /// A diagram element that stands for code: its code.
     var showCode: (() -> Void)? = nil
-    let askHere: (String) -> Void
+    /// A typed question kept as a thread here (nil: none here; on a native code page, questions are written with
+    /// the Pencil, and typed ones go to a side chat).
+    let askHere: ((String) -> Void)?
     let askClaude: () -> Void
     @State private var asking = false
     @State private var question = ""
@@ -557,10 +561,12 @@ struct PickBar: View {
                 if let showCode {
                     Button("Show Code", systemImage: "chevron.left.forwardslash.chevron.right", action: showCode).buttonStyle(.bordered)
                 }
-                Button("Ask Here", systemImage: "questionmark.bubble") { asking.toggle() }
-                    .buttonStyle(.bordered)
-                    .help("A question about \(title), answered beside it and kept as its thread")
-                    .accessibilityIdentifier("ask-here")
+                if askHere != nil {
+                    Button("Ask Here", systemImage: "questionmark.bubble") { asking.toggle() }
+                        .buttonStyle(.bordered)
+                        .help("A question about \(title), answered beside it and kept as its thread")
+                        .accessibilityIdentifier("ask-here")
+                }
                 Button("Ask Claude", systemImage: "bubble.left", action: askClaude)
                     .buttonStyle(.borderedProminent)
                     .help("Ask in the conversation, with \(title) named")
@@ -587,7 +593,7 @@ struct PickBar: View {
 
     private func submit() {
         guard !trimmed.isEmpty else { return }
-        askHere(trimmed)
+        askHere?(trimmed)
         question = ""
         asking = false
     }

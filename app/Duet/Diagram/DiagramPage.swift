@@ -575,6 +575,8 @@ struct LineMark: Equatable {
     var cards: [NoteCard] = []
     /// Every note on the line, resolved ones too, oldest first: the native page's history of what was asked here.
     var history: [NoteCard] = []
+    /// One of them is being answered now: its bubble or pill pulses gently.
+    var answering = false
 }
 
 /// A note under the line it was written on, as in a code review: what you asked, and the start of Claude's answer

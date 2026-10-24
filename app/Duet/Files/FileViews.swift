@@ -325,6 +325,18 @@ struct FileViewer: View {
         #endif
     }
 
+    /// The notes the tray offers to send: on the native page, not the questions (they ask themselves).
+    private var trayDrafts: Binding<[DraftNote]> {
+        guard nativePage else { return $drafts }
+        return Binding(get: { drafts.filter { !Self.asksItself($0) } },
+                       set: { kept in drafts = drafts.filter { Self.asksItself($0) } + kept })
+    }
+
+    /// A note on the native page that's sent as soon as it's read: a question in words (not one only by ink colour).
+    static func asksItself(_ d: DraftNote) -> Bool {
+        d.span != nil && d.note.intent == .question && (CodeQuestion.asks(d.note.text) || d.reading?.kind == .question)
+    }
+
     /// The file is on the native page (iPad, with the setting on).
     private var nativePage: Bool {
         #if os(iOS)
@@ -412,11 +424,13 @@ struct FileViewer: View {
     private func marks(_ text: String) -> (marks: [Int: LineMark], unplaced: Int) {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let rank = ["open": 2, "answered": 1, "resolved": 0]
-        var at: [Int: (ids: [String], state: String, cards: [NoteCard], history: [NoteCard])] = [:]
+        var at: [Int: (ids: [String], state: String, cards: [NoteCard], history: [NoteCard], answering: Bool)] = [:]
         var unplaced = 0
         for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) {
             guard let l = a.lines?.first, let r = Reanchor.place(l, in: lines) else { unplaced += 1; continue }
-            var e = at[r.lowerBound] ?? ([], "resolved", [], [])
+            var e = at[r.lowerBound] ?? ([], "resolved", [], [], false)
+            // Being answered now (or asked a moment ago and not yet picked up): its pill pulses.
+            if a.answering != nil || (a.status == "open" && a.intent == .question && Date().timeIntervalSince(a.date) < 120) { e.answering = true }
             e.ids.append(a.id)
             // The most pressing wins: waiting, then answered, then resolved.
             if rank[a.status, default: 0] > rank[e.state, default: 0] { e.state = a.status }
@@ -429,7 +443,7 @@ struct FileViewer: View {
             e.history.append(NoteCard.of(a, gist: gist))
             at[r.lowerBound] = e
         }
-        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards, history: $0.history) }, unplaced)
+        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards, history: $0.history, answering: $0.answering) }, unplaced)
     }
 
     /// The start of an answer for its card: its first paragraph of prose, after any "Let me look…" on the way there,
@@ -471,7 +485,12 @@ struct FileViewer: View {
                                        decor: CodePageDecor(changed: Set(f.changed ?? []), removedAfter: Set(f.removedAfter ?? []),
                                                             marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? "")),
                                        onSelect: { selected = $0 }, onMark: { ids in page.onMark?(ids) },
-                                       onDiagram: { id, element in page.onDiagram?(id, element) })
+                                       onDiagram: { id, element in page.onDiagram?(id, element) },
+                                       onQuestion: { id in Task { await send(only: [id]) } },
+                                       onCancel: { id in
+                                           drafts.removeAll { $0.id == id }
+                                           if model.store.annotations[id] != nil { model.send(.annotationUpdate(id: id, delete: true)) }
+                                       })
         } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
@@ -490,13 +509,14 @@ struct FileViewer: View {
             }
             if let selected, let line = selected.line {
                 PickBar(title: "Line \(line)", symbol: "text.line.first.and.arrowtriangle.forward", monospaced: true,
-                        askHere: { q in
+                        askHere: nativePage ? nil : { q in
                             model.askHere(q, on: .file(path: path), lines: [InkLines(file: path, start: line, end: line, code: selected.label)])
                         },
                         askClaude: { model.askAbout("About \(Paths.short(path)):\(line) (`\(selected.label)`): ", compact: density == .compact) })
             }
-            if pencil, drafts.contains(where: { !$0.sent }) {
-                NotesTray(drafts: $drafts, squeezeSends: !nativePage) { Task { await send() } }
+            // On the native page, a question written with the Pencil asks itself: the tray holds the other notes.
+            if pencil, drafts.contains(where: { !$0.sent && !(nativePage && Self.asksItself($0)) }) {
+                NotesTray(drafts: trayDrafts, squeezeSends: !nativePage) { Task { await send() } }
             }
         }
         .background(pencil ? AnyShapeStyle(.clear) : AnyShapeStyle(.bar))
@@ -602,6 +622,18 @@ struct FileViewer: View {
 
     private func push(_ route: FilesRoute) {
         if let filesStack { filesStack.path.append(route) } else { model.open(route, compact: density == .compact) }
+    }
+
+    /// Just these notes, now: a question written with the Pencil, read and tagged, asks itself without sweeping up
+    /// the other notes waiting on the page.
+    private func send(only ids: Set<String>) async {
+        #if os(iOS)
+        let pending = drafts.filter { ids.contains($0.id) && !$0.sent }
+        guard !pending.isEmpty else { return }
+        let image = await nativeInk.snapshot(only: ids)?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
+        model.send(.notes(surface: .file(path: path), items: await nativeInk.items(pending), image: image, imageType: image == nil ? nil : "image/jpeg"))
+        for i in drafts.indices where ids.contains(drafts[i].id) { drafts[i].sent = true }
+        #endif
     }
 
     private func send() async {

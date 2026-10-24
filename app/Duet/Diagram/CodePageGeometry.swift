@@ -37,6 +37,9 @@ struct CodePageGeometry: Equatable {
     private(set) var hanging: [Int: Int] = [:]
     /// The first row of each line (index 0 is line 1), and the total after the last.
     private var firstRow: [Int] = []
+    /// Each line's indent and length in characters (index 0 is line 1): where its code is, for what a mark covers.
+    private var extents: [Extent] = []
+    private struct Extent: Equatable { let lead: Int; let count: Int }
 
     /// Every row's height, and the margins, follow from the font's size.
     var lineHeight: CGFloat { (fontSize * 1.5).rounded() }
@@ -53,6 +56,7 @@ struct CodePageGeometry: Equatable {
         self.advance = advance
         self.fontSize = fontSize
         firstRow = Array(0...self.lineCount)
+        extents = Array(repeating: Extent(lead: 0, count: columns), count: self.lineCount)
     }
 
     /// The file's lines on paper `paper` characters wide (nil: as wide as its longest line, so nothing wraps). Tabs
@@ -67,6 +71,8 @@ struct CodePageGeometry: Equatable {
         self.fontSize = fontSize
         var first = [0]
         first.reserveCapacity(lineCount + 1)
+        extents = lines.map { l in Extent(lead: l.prefix { $0 == " " }.count, count: l.count) }
+        if extents.isEmpty { extents = [Extent(lead: 0, count: 0)] }
         for (i, line) in lines.enumerated() {
             var rows = 1
             if line.count > self.paper {
@@ -128,6 +134,53 @@ struct CodePageGeometry: Equatable {
         guard r.maxY > top, r.minY < end else { return nil }
         guard let first = line(at: max(r.minY, top)), let last = line(at: min(r.maxY, end) - 0.01) else { return nil }
         return first...last
+    }
+
+    // MARK: where the code is
+
+    /// Row `k` of line `n`: its first character, and where that character sits across the page.
+    private func row(_ n: Int, _ k: Int) -> (start: Int, end: Int, x: CGFloat) {
+        guard let rows = wrapped[n] else { return (0, extents[n - 1].count, codeX) }
+        let r = rows[k]
+        return (r.start, r.end, codeX + CGFloat(k == 0 ? 0 : hanging[n] ?? 0) * advance)
+    }
+
+    /// Line `n`'s length and indent, in characters.
+    func length(line n: Int) -> Int { n >= 1 && n <= lineCount ? extents[n - 1].count : 0 }
+    func lead(line n: Int) -> Int { n >= 1 && n <= lineCount ? extents[n - 1].lead : 0 }
+
+    /// Where line `n`'s code is: one rectangle per row, from its first character to its last (a blank line has none).
+    func codeRects(line n: Int) -> [CGRect] {
+        guard n >= 1, n <= lineCount else { return [] }
+        let e = extents[n - 1], top = rect(line: n, width: 0).minY
+        return (0..<rows(line: n)).compactMap { k in
+            let r = row(n, k)
+            let from = k == 0 ? max(r.start, e.lead) : r.start
+            guard r.end > from else { return nil }
+            return CGRect(x: r.x + CGFloat(from - r.start) * advance, y: top + CGFloat(k) * lineHeight, width: CGFloat(r.end - from) * advance, height: lineHeight)
+        }
+    }
+
+    /// Characters `cols` of line `n`, one rectangle per row they're on.
+    func charRects(line n: Int, cols: ClosedRange<Int>) -> [CGRect] {
+        guard n >= 1, n <= lineCount else { return [] }
+        let top = rect(line: n, width: 0).minY
+        return (0..<rows(line: n)).compactMap { k in
+            let r = row(n, k)
+            let a = max(cols.lowerBound, r.start), b = min(cols.upperBound + 1, r.end)
+            guard b > a else { return nil }
+            return CGRect(x: r.x + CGFloat(a - r.start) * advance, y: top + CGFloat(k) * lineHeight, width: CGFloat(b - a) * advance, height: lineHeight)
+        }
+    }
+
+    /// The character of line `n` under a point (across its row), if the point is on its code.
+    func column(line n: Int, at p: CGPoint) -> Int? {
+        guard n >= 1, n <= lineCount else { return nil }
+        let k = Int(floor((p.y - rect(line: n, width: 0).minY) / lineHeight))
+        guard k >= 0, k < rows(line: n) else { return nil }
+        let r = row(n, k)
+        let c = r.start + Int(floor((p.x - r.x) / advance))
+        return c >= max(r.start, k == 0 ? extents[n - 1].lead : 0) && c < r.end ? c : nil
     }
 
     /// What a note can be tagged to: each line, all its rows, as the web page reported them (id `L<n>`, the line's code

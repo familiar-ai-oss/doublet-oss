@@ -20,6 +20,8 @@ enum CodePageHit: Equatable {
     case diagram(String, element: String?)
     /// A line's notes, folded: open (or close) its history.
     case history(Int)
+    /// A question asked a moment ago: take it back.
+    case cancel(String)
 }
 
 /// The decorations, drawn into the code view (so they zoom and scroll with it): tints and stripes under the text, bubbles,
@@ -31,6 +33,11 @@ final class CodeDecorations {
     static let cardGap: CGFloat = 16
 
     private let under = CALayer()
+    /// What each note's mark was snapped to: drawn behind the ink, so the mark is confirmed without asking.
+    private let snaps = CAShapeLayer()
+    private let shownSnaps = CAShapeLayer()
+    /// Bubbles and pills of notes being answered, pulsing.
+    private var pulsing: [CALayer] = []
     private let selection = CAShapeLayer()
     private var views: [UIView] = []
     private(set) var hits: [(rect: CGRect, hit: CodePageHit)] = []
@@ -38,6 +45,8 @@ final class CodeDecorations {
     init(in code: UIView) {
         under.anchorPoint = .zero
         code.layer.insertSublayer(under, at: 0)
+        // Over the code's tints, under its text and the ink.
+        for l in [snaps, shownSnaps] { l.fillColor = UIColor.clear.cgColor; code.layer.insertSublayer(l, above: under) }
         selection.fillColor = UIColor.clear.cgColor
         selection.strokeColor = UIColor.systemBlue.withAlphaComponent(0.95).cgColor
         selection.lineWidth = 2
@@ -50,8 +59,26 @@ final class CodeDecorations {
         return max(codeEnd, pageWidth - cardWidth - cardGap)
     }
 
-    func lay(_ d: CodePageDecor, cards showsCards: Bool, open: Int?, geometry g: CodePageGeometry, pageWidth width: CGFloat, zoom z: CGFloat, in code: UIView) {
+    func lay(_ d: CodePageDecor, cards showsCards: Bool, open: Int?, snapped: [(rects: [CGRect], shown: Bool)] = [], cancellable: Set<String> = [],
+             geometry g: CodePageGeometry, pageWidth width: CGFloat, zoom z: CGFloat, in code: UIView) {
         under.sublayers = nil
+        pulsing = []
+        // A quiet outline around what each mark picked out; a fallback (the nearest line) is shown plainly, tinted,
+        // since it's a guess.
+        let quiet = UIBezierPath(), plain = UIBezierPath()
+        for s in snapped {
+            for r in s.rects {
+                let box = CGRect(x: r.minX * z - 2, y: r.minY * z + 1, width: r.width * z + 4, height: r.height * z - 2)
+                (s.shown ? plain : quiet).append(UIBezierPath(roundedRect: box, cornerRadius: 4 * z))
+            }
+        }
+        snaps.path = quiet.cgPath
+        snaps.strokeColor = UIColor.systemBlue.withAlphaComponent(0.35).cgColor
+        snaps.lineWidth = 1.5 * z
+        shownSnaps.path = plain.cgPath
+        shownSnaps.strokeColor = UIColor.systemOrange.withAlphaComponent(0.8).cgColor
+        shownSnaps.fillColor = UIColor.systemOrange.withAlphaComponent(0.1).cgColor
+        shownSnaps.lineWidth = 2 * z
         for v in views { v.removeFromSuperview() }
         views = []
         hits = []
@@ -89,7 +116,9 @@ final class CodeDecorations {
             let r = g.rect(line: n, width: width)
             let box = CGRect(x: 3, y: r.minY + 2, width: 18, height: 16)
             if let m = d.marks[n] {
-                add(Badge(state: m.state, count: m.ids.count), box, z, in: code)
+                let badge = Badge(state: m.state, count: m.ids.count)
+                add(badge, box, z, in: code)
+                if m.answering { pulse(badge.layer) }
                 hits.append((box.insetBy(dx: -6, dy: -2), .history(n)))
             } else if let (p, e) = elementAt[n] {
                 let mark = UILabel()
@@ -117,6 +146,7 @@ final class CodeDecorations {
                 let pill = Pill(history: m.history, state: m.state)
                 let f = CGRect(x: x, y: r.minY + 2, width: min(Self.cardWidth, pill.width), height: g.lineHeight - 4)
                 add(pill, f, z, in: code)
+                if m.answering { pulse(pill.layer) }
                 hits.append((f, .history(n)))
             }
         }
@@ -124,11 +154,42 @@ final class CodeDecorations {
         if let n = open, n <= g.lineCount, let m = d.marks[n], !m.history.isEmpty {
             let line = g.rect(line: n, width: width)
             let w = showsCards ? Self.cardWidth : min(420, width - g.codeX - g.right)
-            let card = HistoryCard(m.history.reversed(), dark: dark)
+            let takeBack = m.history.last { cancellable.contains($0.id) }?.id
+            let card = HistoryCard(m.history.reversed(), takeBack: takeBack != nil, dark: dark)
             let f = CGRect(x: showsCards ? x : g.codeX, y: line.maxY + 2, width: w, height: card.height(width: w))
             add(card, f, z, in: code)
             for (id, r) in card.rows(width: w) { hits.append((r.offsetBy(dx: f.minX, dy: f.minY), .notes([id]))) }
-            hits.append((CGRect(x: f.minX, y: f.maxY - HistoryCard.footer, width: w, height: HistoryCard.footer), .notes(m.ids)))
+            hits.append((CGRect(x: f.minX, y: f.maxY - HistoryCard.footer, width: w / 2, height: HistoryCard.footer), .notes(m.ids)))
+            if let takeBack { hits.append((CGRect(x: f.minX + w / 2, y: f.maxY - HistoryCard.footer, width: w / 2, height: HistoryCard.footer), .cancel(takeBack))) }
+        }
+    }
+
+    /// A gentle pulse (Core Animation, at most 30 frames a second) while a note is being answered.
+    private func pulse(_ layer: CALayer) {
+        let a = CABasicAnimation(keyPath: "opacity")
+        a.fromValue = 1
+        a.toValue = 0.35
+        a.duration = 0.9
+        a.autoreverses = true
+        a.repeatCount = .infinity
+        a.preferredFrameRateRange = CAFrameRateRange(minimum: 8, maximum: 30, preferred: 30)
+        layer.add(a, forKey: "answering")
+        pulsing.append(layer)
+    }
+
+    /// Held still while the Pencil is down (nothing moves near the writing), and going again after.
+    func pausePulses(_ paused: Bool) {
+        for l in pulsing {
+            if paused, l.speed != 0 {
+                l.timeOffset = l.convertTime(CACurrentMediaTime(), from: nil)
+                l.speed = 0
+            } else if !paused, l.speed == 0 {
+                let t = l.timeOffset
+                l.speed = 1
+                l.timeOffset = 0
+                l.beginTime = 0
+                l.beginTime = l.convertTime(CACurrentMediaTime(), from: nil) - t
+            }
         }
     }
 
@@ -237,11 +298,14 @@ private final class HistoryCard: UIView, ZoomDrawn {
     private static let pad: CGFloat = 10
     private let items: [NoteCard]
     private let dark: Bool
+    /// Its newest question was asked a moment ago: it can be taken back.
+    private let takeBack: Bool
     var zoom: CGFloat = 1 { didSet { setNeedsDisplay() } }
 
-    init(_ items: some Sequence<NoteCard>, dark: Bool) {
+    init(_ items: some Sequence<NoteCard>, takeBack: Bool, dark: Bool) {
         self.items = Array(items.prefix(6))
         self.dark = dark
+        self.takeBack = takeBack
         super.init(frame: .zero)
         isOpaque = false
         backgroundColor = .clear
@@ -297,6 +361,10 @@ private final class HistoryCard: UIView, ZoomDrawn {
         }
         let foot = NSAttributedString(string: "All notes on this line ›", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemBlue])
         foot.draw(at: CGPoint(x: Self.pad, y: bounds.height / zoom - Self.footer + 6))
+        if takeBack {
+            let back = NSAttributedString(string: "Take back question", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemRed])
+            back.draw(at: CGPoint(x: width / 2 + Self.pad, y: bounds.height / zoom - Self.footer + 6))
+        }
     }
 }
 
