@@ -545,6 +545,8 @@ struct FileViewer: View {
             }
             Divider()
             Button("New Note Page", systemImage: "plus") { nativeInk.addPage() }
+            // Long lines wrap on the file's paper, cut to the width it was first shown at; this cuts it again.
+            Button("Reflow to This Width", systemImage: "text.alignleft") { nativeInk.reflow() }
             if let id = nativeInk.current {
                 Button("Rename…", systemImage: "pencil") { newName = nativeInk.currentName; renaming = id }
                 if nativeInk.pages.count > 1 {

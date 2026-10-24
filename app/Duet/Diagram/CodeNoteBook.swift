@@ -16,6 +16,8 @@ struct CodeNoteBook: Codable, Equatable {
     var current: UUID
     /// The line height the ink was written for (nil: 20, the first native pages').
     var lineHeight: CGFloat?
+    /// The paper's width in characters: long lines wrap inside it (nil: not chosen yet).
+    var paper: Int?
 
     static let earlierName = "Earlier notes"
 
@@ -115,6 +117,7 @@ struct CodeNoteBook: Codable, Equatable {
             for j in pages[i].drafts.indices {
                 pages[i].drafts[j].strokeIDs = Set(pages[i].drafts[j].strokeIDs.map { renamed[$0] ?? $0 })
                 pages[i].drafts[j].bounds = pages[i].drafts[j].bounds.applying(t)
+                pages[i].drafts[j].tagged = pages[i].drafts[j].tagged?.mapValues { $0.applying(t) }
             }
         }
     }
@@ -142,7 +145,7 @@ struct CodeNoteBook: Codable, Equatable {
             guard !ids.isEmpty else { continue }
             d.strokeIDs = ids
             d.bounds = d.bounds.applying(t)
-            d.tagged = nil
+            d.tagged = [InkNoteTaker.lineKey: CGPoint(x: 0, y: geometry.rect(line: line, width: 0).minY)]
             d.anchorCenter = nil
             kept.append(d)
         }

@@ -44,11 +44,11 @@ final class CodeDecorations {
 
     /// Where the cards' column starts: after the code, or at the page's right edge when there's room.
     static func cardsX(_ g: CodePageGeometry, pageWidth: CGFloat) -> CGFloat {
-        let codeEnd = g.codeX + CGFloat(g.columns) * g.advance + cardGap
+        let codeEnd = g.codeX + CGFloat(min(g.columns, g.paper)) * g.advance + cardGap
         return max(codeEnd, pageWidth - cardWidth - cardGap)
     }
 
-    func lay(_ d: CodePageDecor, geometry g: CodePageGeometry, pageWidth width: CGFloat, zoom z: CGFloat, in code: UIView) {
+    func lay(_ d: CodePageDecor, cards showsCards: Bool, geometry g: CodePageGeometry, pageWidth width: CGFloat, zoom z: CGFloat, in code: UIView) {
         under.sublayers = nil
         for v in views { v.removeFromSuperview() }
         views = []
@@ -59,6 +59,12 @@ final class CodeDecorations {
             l.frame = CGRect(x: r.minX * z, y: r.minY * z, width: r.width * z, height: r.height * z)
             l.backgroundColor = color.cgColor
             under.addSublayer(l)
+        }
+        // A wrapped line's rows read as one line: a faint band across them, and a bar joining them beside the code.
+        for n in g.wrapped.keys {
+            let r = g.rect(line: n, width: width)
+            band(r, UIColor.label.withAlphaComponent(dark ? 0.06 : 0.035))
+            band(CGRect(x: g.codeX - 3, y: r.minY + 3, width: 2, height: r.height - 6), UIColor.tertiaryLabel)
         }
         let green = UIColor(red: 0x2d / 255, green: 0xa4 / 255, blue: 0x4e / 255, alpha: 1)
         for n in d.changed where n <= g.lineCount {
@@ -99,7 +105,7 @@ final class CodeDecorations {
         var cards: [(line: Int, view: Card, hit: CodePageHit)] = []
         for p in d.peeks { cards.append((p.line, Card(diagram: p, dark: dark), .diagram(p.id, element: nil))) }
         for (n, m) in d.marks { for c in m.cards { cards.append((n, Card(note: c, dark: dark), .notes([c.id]))) } }
-        for c in cards.sorted(by: { $0.line < $1.line }) where c.line <= g.lineCount {
+        for c in cards.sorted(by: { $0.line < $1.line }) where showsCards && c.line <= g.lineCount {
             let h = c.view.height(width: Self.cardWidth)
             let y = max(g.rect(line: c.line, width: width).minY, below)
             let r = CGRect(x: x, y: y, width: Self.cardWidth, height: h)

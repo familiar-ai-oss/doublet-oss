@@ -23,6 +23,8 @@ final class NativeInkController {
     func addPage() { view?.addPage() }
     func rename(_ id: UUID, to name: String) { view?.rename(id, to: name) }
     func remove(_ id: UUID) { view?.remove(id) }
+    /// Wrap the file again for the width it's shown at now.
+    func reflow() { view?.reflow() }
 
     /// Show this line (from a note or a diagram), picked.
     func reveal(line: Int) { view?.reveal(line: line) }
@@ -139,6 +141,10 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     /// The last tap, to tell a double tap's second tap from a new one.
     private var lastTap: (time: CFTimeInterval, at: CGPoint)?
     private var geometry = CodePageGeometry(lineCount: 1, columns: 1, advance: 8)
+    /// The file's text as laid out (tabs as spaces).
+    private var layoutText = ""
+    /// The book's current page is on the canvas (it waits for the page's width to be known).
+    private var pageLoaded = false
     private var anchors: [InkAnchor] = []
     private var book: CodeNoteBook?
     private var penDown = false
@@ -190,7 +196,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         code.isOpaque = true
         code.textContainerInset = .zero
         code.textContainer.lineFragmentPadding = 0
-        // Lines never wrap: a line's place on the page is fixed, so ink stays on its line at any width or zoom.
+        // The page wraps long lines itself (onto rows of the paper), so the text view never does.
         code.textContainer.widthTracksTextView = false
         code.textContainer.lineBreakMode = .byClipping
         code.layer.anchorPoint = .zero
@@ -226,37 +232,93 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         if let shown, shown.path == path, shown.text == text, decor == self.decor { return }
         guard !penDown, !notes.busy else { waiting = (path, text, decor); return }
         waiting = nil
-        let first = shown?.path != path, changed = shown?.text != text
+        let first = shown?.path != path
         shown = (path, text)
         self.decor = decor
-        let size = fontSize
-        geometry = CodePageGeometry(text: text, advance: advance(size), fontSize: size)
+        layoutText = CodePageGeometry.expanded(text)
         if first {
-            var book = CodeNoteBook.load(key: key, geometry: geometry)
+            // Its notes, brought over from the web page if it's new, laid out as if nothing wrapped; laying out on the
+            // paper then moves each note to its line.
+            let size = fontSize
+            var book = CodeNoteBook.load(key: key, geometry: CodePageGeometry(text: layoutText, advance: advance(size), fontSize: size))
             // Written at another text size: the ink grows or shrinks with the page, so it stays on its lines.
-            book.fit(lineHeight: geometry.lineHeight)
+            book.fit(lineHeight: CodePageGeometry(lineCount: 1, columns: 1, advance: 1, fontSize: size).lineHeight)
             self.book = book
-            loadPage(book.page)
-            publishPages()
-        } else if changed {
-            // The file changed under its notes: each note's ink moves with its lines.
-            if notes.follow(text, lineHeight: geometry.lineHeight) { onDrafts?(notes.drafts); save() }
+            pageLoaded = false
         }
-        drawCode()
+        layOut()
         if let line = pendingReveal { pendingReveal = nil; reveal(line: line) }
+    }
+
+    /// Lay the file out on its paper (chosen now from the page's width, the first time), with its notes where its
+    /// lines are, fitted to the width by zooming, and draw it.
+    private func layOut(reflow: Bool = false) {
+        guard shown != nil, var book, bounds.width > 0 else { return }
+        let size = fontSize, adv = advance(size)
+        if book.paper == nil || reflow {
+            book.paper = columns(fitting: bounds.width, advance: adv, size: size)
+            self.book = book
+            save()
+        }
+        geometry = CodePageGeometry(text: layoutText, advance: adv, fontSize: size, paper: book.paper)
+        if !pageLoaded {
+            pageLoaded = true
+            loadPage(book.page)
+            onDrafts?(notes.drafts)
+            publishPages()
+        } else if notes.follow(layoutText, geometry: geometry) {
+            // The file changed under its notes, or the paper did: each note's ink moves with its line.
+            onDrafts?(notes.drafts)
+            save()
+        }
+        fitZoom()
+        drawCode()
+    }
+
+    /// How many characters of code fit across this width, beside the cards' column when there's room for it.
+    private func columns(fitting width: CGFloat, advance: CGFloat, size: CGFloat) -> Int {
+        let g = CodePageGeometry(text: layoutText, advance: advance, fontSize: size)
+        let cards = decor.hasCards && width >= Self.cardsWidth ? CodeDecorations.cardWidth + CodeDecorations.cardGap * 2 : 0
+        return max(CodePageGeometry.minimumPaper, Int((width - g.codeX - g.right - cards) / advance))
+    }
+
+    /// Narrower than this, the page has no room for cards beside the code without shrinking it: their notes open
+    /// from the bubbles in the gutter instead.
+    static let cardsWidth: CGFloat = 700
+    private var showsCards: Bool { decor.hasCards && bounds.width >= Self.cardsWidth }
+
+    /// The page's width at zoom 1: the paper, with the cards beside it, and at least the screen's width.
+    private var pageWidth: CGFloat {
+        var w = geometry.width
+        if showsCards { w = max(w, CodeDecorations.cardsX(geometry, pageWidth: 0) + CodeDecorations.cardWidth + CodeDecorations.cardGap) }
+        return max(w, bounds.width)
+    }
+
+    /// The whole paper fits the width: it's the least zoom, and the page shows at it unless zoomed in.
+    private func fitZoom() {
+        let fit = min(1, bounds.width / max(pageWidth, 1))
+        let atFit = abs(canvas.zoomScale - canvas.minimumZoomScale) < 0.01
+        canvas.minimumZoomScale = fit
+        if atFit || canvas.zoomScale < fit { canvas.zoomScale = fit }
+    }
+
+    /// Wrap the file again for this page's width, from the page menu; each note's ink moves with its line.
+    func reflow() {
+        guard !penDown, !notes.busy else { return }
+        layOut(reflow: true)
+        canvas.zoomScale = canvas.minimumZoomScale
+        drawCode()
     }
 
     /// The user's text size changed: the page is laid out again at the new size, and its ink scaled to match.
     private func resize() {
-        guard let shown, var book, abs(fontSize - geometry.fontSize) > 0.01 else { return }
+        guard shown != nil, var book, abs(fontSize - geometry.fontSize) > 0.01 else { return }
         guard !penDown, !notes.busy else { return }
         keepCurrent(in: &book)
-        geometry = CodePageGeometry(text: shown.text, advance: advance(fontSize), fontSize: fontSize)
-        book.fit(lineHeight: geometry.lineHeight)
+        book.fit(lineHeight: CodePageGeometry(lineCount: 1, columns: 1, advance: 1, fontSize: fontSize).lineHeight)
         self.book = book
-        loadPage(book.page)
-        onDrafts?(notes.drafts)
-        drawCode()
+        pageLoaded = false
+        layOut()
         save()
     }
 
@@ -265,10 +327,10 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         show(path: w.path, text: w.text, decor: w.decor)
     }
 
-    /// A page's ink and notes onto the canvas, each note where its lines are in the file now.
+    /// A page's ink and notes onto the canvas, each note where its line is in the file now.
     private func loadPage(_ page: CodeNotePage) {
         notes.load((try? PKDrawing(data: page.drawing)) ?? PKDrawing(), drafts: page.drafts)
-        if let shown, notes.follow(shown.text, lineHeight: geometry.lineHeight) { onDrafts?(notes.drafts); save() }
+        if notes.follow(layoutText, geometry: geometry) { onDrafts?(notes.drafts); save() }
     }
 
     override func didMoveToWindow() {
@@ -298,8 +360,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         if canvas.frame != bounds {
             let wider = canvas.frame.width != bounds.width
             canvas.frame = bounds
-            // The page is at least as wide as the screen, with the cards at its right edge.
-            if wider { drawCode() } else { sizePage() }
+            // Another width: the same paper, fitted to it by zooming (the first time, the paper is cut to it).
+            if wider { layOut() } else { sizePage() }
         }
     }
 
@@ -407,8 +469,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         let page = pageSize
         var rect = CGRect(origin: .zero, size: page)
         if rect.height > 2200, !ink.isNull { rect = ink.insetBy(dx: 0, dy: -260).intersection(rect); rect.origin.x = 0; rect.size.width = page.width }
-        guard let lines = geometry.lines(in: rect) else { return nil }
-        let text = Self.page(shown.text, path: shown.path, geometry: geometry, zoom: 1,
+        guard geometry.lines(in: rect) != nil else { return nil }
+        let text = Self.page(layoutText, path: shown.path, geometry: geometry, zoom: 1,
                              dark: false) as NSAttributedString
         let ns = text.string as NSString
         let drawing = canvas.drawing.image(from: rect, scale: 1)
@@ -421,14 +483,14 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
                 ctx.fill(CGRect(x: 0, y: 0, width: rect.width * scale, height: rect.height * scale))
                 ctx.cgContext.scaleBy(x: scale, y: scale)
                 ctx.cgContext.translateBy(x: 0, y: -rect.minY)
-                // The page's text is a margin line, then a line per line of the file.
-                var at = NSMaxRange(ns.lineRange(for: NSRange(location: 0, length: 0)))
-                for n in 1...lines.upperBound {
-                    let r = ns.lineRange(for: NSRange(location: min(at, ns.length), length: 0))
-                    if n >= lines.lowerBound {
-                        text.attributedSubstring(from: r).draw(with: geometry.rect(line: n, width: rect.width), options: .usesLineFragmentOrigin, context: nil)
-                    }
+                // The page's text is a margin line, then a row per row of the page.
+                var at = NSMaxRange(ns.lineRange(for: NSRange(location: 0, length: 0))), row = 0
+                let first = Int(((rect.minY - geometry.top) / geometry.lineHeight).rounded(.down)), last = Int(((rect.maxY - geometry.top) / geometry.lineHeight).rounded(.up))
+                while at < ns.length, row <= last {
+                    let r = ns.lineRange(for: NSRange(location: at, length: 0))
+                    if row >= first { text.attributedSubstring(from: r).draw(with: geometry.rect(row: row, width: rect.width), options: .usesLineFragmentOrigin, context: nil) }
                     at = NSMaxRange(r)
+                    row += 1
                 }
                 drawing.draw(in: rect)
             }
@@ -450,15 +512,14 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         guard let shown else { return }
         let z = canvas.zoomScale
         drawnZoom = z
-        let attributed = Self.page(shown.text, path: shown.path, geometry: geometry, zoom: z,
+        let attributed = Self.page(layoutText, path: shown.path, geometry: geometry, zoom: z,
                                    dark: traitCollection.userInterfaceStyle == .dark)
-        var page = geometry.size(atLeast: bounds.size)
-        if decor.hasCards { page.width = max(page.width, CodeDecorations.cardsX(geometry, pageWidth: 0) + CodeDecorations.cardWidth + CodeDecorations.cardGap) }
-        anchors = geometry.anchors(path: shown.path, text: shown.text, width: page.width)
+        var page = geometry.size(atLeast: CGSize(width: pageWidth, height: bounds.height / max(canvas.minimumZoomScale, 0.01)))
+        anchors = geometry.anchors(path: shown.path, text: layoutText, width: page.width)
         code.transform = .identity
         code.layer.position = .zero
         code.attributedText = attributed
-        decorations.lay(decor, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
+        decorations.lay(decor, cards: showsCards, geometry: geometry, pageWidth: page.width, zoom: z, in: code)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: page.width) }, zoom: z)
         // Cards may run past the last line.
         page.height = max(page.height, decorations.bottom() + geometry.bottom)
@@ -488,17 +549,34 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         top.minimumLineHeight = g.top * zoom
         top.maximumLineHeight = g.top * zoom
         out.append(NSAttributedString(string: "\n", attributes: [.font: font, .paragraphStyle: top]))
+        let wrap: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: UIColor.tertiaryLabel, .paragraphStyle: para]
         let ns = text as NSString
         var start = 0
         for n in 1...lineCount {
             let label = String(n)
             out.append(NSAttributedString(string: String(repeating: " ", count: gutter - 2 - label.count) + label + "  ", attributes: number))
             let range = ns.lineRange(for: NSRange(location: min(start, ns.length), length: 0))
-            let line = NSMutableAttributedString(attributedString: styled.attributedSubstring(from: range))
-            if !line.string.hasSuffix("\n") { line.append(NSAttributedString(string: "\n", attributes: [.font: font])) }
-            line.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: line.length))
-            out.append(line)
             start = NSMaxRange(range)
+            let line = NSMutableAttributedString(attributedString: styled.attributedSubstring(from: range))
+            if line.string.hasSuffix("\n") { line.deleteCharacters(in: NSRange(location: line.length - 1, length: 1)) }
+            guard let rows = g.wrapped[n] else {
+                line.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+                line.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: line.length))
+                out.append(line)
+                continue
+            }
+            // A long line on its rows: no number on a continuation row (a ↪ where it would be), hanging under the
+            // line's own indent, and a dim ⏎ where a row had to break mid-word. Its colours run across the breaks.
+            let utf16 = line.string.reduce(into: [0]) { $0.append($0.last! + $1.utf16.count) }
+            let hang = String(repeating: " ", count: g.hanging[n] ?? 4)
+            for (i, row) in rows.enumerated() {
+                if i > 0 { out.append(NSAttributedString(string: String(repeating: " ", count: gutter - 3) + "↪  " + hang, attributes: wrap)) }
+                let piece = NSMutableAttributedString(attributedString: line.attributedSubstring(from: NSRange(location: utf16[row.start], length: utf16[row.end] - utf16[row.start])))
+                if row.hard { piece.append(NSAttributedString(string: "⏎", attributes: wrap)) }
+                piece.append(NSAttributedString(string: "\n", attributes: [.font: font]))
+                piece.addAttribute(.paragraphStyle, value: para, range: NSRange(location: 0, length: piece.length))
+                out.append(piece)
+            }
         }
         return out
     }
@@ -526,10 +604,10 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
 
     /// Two taps zoom in on where they were, or back out to the whole width.
     @objc private func doubleTapped(_ g: UITapGestureRecognizer) {
-        if canvas.zoomScale > 1.05 {
-            canvas.setZoomScale(1, animated: true)
+        if canvas.zoomScale > canvas.minimumZoomScale * 1.05 {
+            canvas.setZoomScale(canvas.minimumZoomScale, animated: true)
         } else {
-            let p = g.location(in: canvas), z: CGFloat = 2
+            let p = g.location(in: canvas), z: CGFloat = max(2 * canvas.minimumZoomScale, 1.5)
             let size = CGSize(width: canvas.bounds.width / z * canvas.zoomScale, height: canvas.bounds.height / z * canvas.zoomScale)
             canvas.zoom(to: CGRect(x: p.x - size.width / 2, y: p.y - size.height / 2, width: size.width, height: size.height), animated: true)
         }

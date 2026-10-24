@@ -98,18 +98,27 @@ final class InkNoteTaker {
         await finish(ids, into: into)
     }
 
-    /// The file changed under its notes: each note's lines are found again by their code, and its ink moves the same
-    /// number of lines. Notes whose code is gone stay where they were. Whether anything moved.
+    /// Where a note's tagged line was when it was last placed (its top, in `DraftNote.tagged`), so its ink can follow.
+    nonisolated static let lineKey = "line"
+
+    /// The page was laid out again (the file changed under its notes, the paper's width or the text size did): each
+    /// note's lines are found again by their code, and its ink moves to where its first line is now. Notes whose code
+    /// is gone stay where they were. Whether anything moved.
     @discardableResult
-    func follow(_ text: String, lineHeight: CGFloat) -> Bool {
+    func follow(_ text: String, geometry g: CodePageGeometry) -> Bool {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         var drawing = canvas.drawing
         var renamed: [UUID: UUID] = [:]
         for i in drafts.indices {
             guard let tagged = drafts[i].note.lines, let first = tagged.first, let now = Reanchor.place(first, in: lines) else { continue }
             let shift = now.lowerBound - first.start
-            guard shift != 0 else { continue }
-            let t = CGAffineTransform(translationX: 0, y: CGFloat(shift) * lineHeight)
+            // Placed before lines could wrap: its line was a plain row then.
+            let was = drafts[i].tagged?[Self.lineKey]?.y ?? g.top + CGFloat(first.start - 1) * g.lineHeight
+            let top = g.rect(line: now.lowerBound, width: 0).minY
+            drafts[i].tagged = [Self.lineKey: CGPoint(x: 0, y: top)]
+            if shift != 0 { drafts[i].note.lines = tagged.map { InkLines(file: $0.file, start: $0.start + shift, end: $0.end + shift, code: $0.code) } }
+            guard abs(top - was) > 0.5 else { continue }
+            let t = CGAffineTransform(translationX: 0, y: top - was)
             for j in drawing.strokes.indices where drafts[i].strokeIDs.contains(drawing.strokes[j].id) {
                 // A moved stroke gets a new id: the canvas redraws strokes it hasn't seen, not ones it has that moved.
                 let s = drawing.strokes[j]
@@ -119,7 +128,6 @@ final class InkNoteTaker {
             }
             drafts[i].strokeIDs = Set(drafts[i].strokeIDs.map { renamed[$0] ?? $0 })
             drafts[i].bounds = drafts[i].bounds.applying(t)
-            drafts[i].note.lines = tagged.map { InkLines(file: $0.file, start: $0.start + shift, end: $0.end + shift, code: $0.code) }
         }
         guard !renamed.isEmpty else { return false }
         // Known before the canvas hears of them, so they aren't taken for new ink.
@@ -188,6 +196,8 @@ final class InkNoteTaker {
                                   diff: true, letterHeight: InkGeometry.letterHeight(strokes.map(\.renderBounds)))
         let box = strokes.reduce(CGRect.null) { $0.union($1.renderBounds) }
         var draft = DraftNote(note: note, strokeIDs: Set(ids), bounds: box)
+        // Where its line is, so its ink can follow it when the page is laid out again.
+        if let line = note.lines?.first?.start, let a = anchors.first(where: { $0.line == line }) { draft.tagged = [Self.lineKey: CGPoint(x: 0, y: a.rect.minY)] }
         let raw = text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !raw.isEmpty {
             // Snapped to the code at once; read by Apple Intelligence in a moment.
