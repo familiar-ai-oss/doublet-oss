@@ -366,6 +366,27 @@ final class AppleIntelligence {
         return OnDeviceText.title(raw)
     }
 
+    /// A note's subject for its pill beside the code.
+    @Generable
+    struct NoteSubject {
+        @Guide(description: "At most 3 words saying what the note asks or says. Code names exactly as written.")
+        var subject: String
+    }
+
+    /// What a handwritten note on a line of code is about, in at most three words (nil when the model is unavailable
+    /// or busy). The note, its code and the answer's first sentence go in the prompt, never the instructions.
+    func noteGist(note: String, code: String, answer: String?) async -> String? {
+        guard model.isAvailable, await free(within: .seconds(8)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        You label a developer's note on a line of code for a small button beside the code. Give the note's subject in \
+        at most three words, so they know what they'd open. Use code names exactly as written.
+        """)
+        var input = "Note:\n\(note.prefix(400))\n\nCode:\n\(code.prefix(800))"
+        if let answer, !answer.isEmpty { input += "\n\nAnswer:\n\(answer.prefix(300))" }
+        guard let r = try? await session.respond(to: input, generating: NoteSubject.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        return NoteGist.clean(r.content.subject)
+    }
+
     func route(_ text: String) async -> Route? {
         if let r = routes[text] { return r }
         guard model.isAvailable, await free(within: .seconds(2)) else { return nil }

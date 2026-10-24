@@ -361,6 +361,7 @@ struct FileViewer: View {
         #endif
         .paneActions { actions }
         .onAppear {
+            NoteGists.shared.apple = model.apple
             page.onTap = { selected = $0 }
             // A note's bubble in the margin: that note (or the notes on that line).
             page.onMark = { ids in push(ids.count == 1 ? .note(ids[0]) : .notes(.file(path))) }
@@ -420,15 +421,12 @@ struct FileViewer: View {
             // The most pressing wins: waiting, then answered, then resolved.
             if rank[a.status, default: 0] > rank[e.state, default: 0] { e.state = a.status }
             // Not yet resolved: a card under the line, with the answer once there is one. Every note goes in the
-            // line's history.
-            let asked = a.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-            let card = NoteCard(id: a.id, question: asked.isEmpty ? "Your handwritten note" : asked,
-                                answer: a.status != "open" && a.answer != nil ? Self.gist(a.answer ?? "") : nil,
-                                chip: a.answered ? AnswerChip.text(for: a) : nil,
-                                waiting: a.answering == "Claude" ? "Claude is answering…" : a.answering != nil ? "A local model is reading the code…" : "Claude is answering…",
-                                resolved: a.status == "resolved")
-            if a.status != "resolved" { e.cards.append(NoteCard(id: card.id, question: card.question, answer: a.status == "answered" ? card.answer : nil, chip: card.chip, waiting: card.waiting)) }
-            e.history.append(card)
+            // line's history, with a gist for its pill (made on this device; its first words until then).
+            let plain = NoteCard.of(a)
+            let gist = NoteGists.shared.gist(question: plain.question, code: NoteGist.code(around: r.lowerBound, in: lines),
+                                             answer: a.answered ? a.answer.map(NoteGist.firstSentence) : nil)
+            if a.status != "resolved" { e.cards.append(NoteCard(id: plain.id, question: plain.question, answer: a.status == "answered" ? plain.answer : nil, chip: plain.chip, waiting: plain.waiting)) }
+            e.history.append(NoteCard.of(a, gist: gist))
             at[r.lowerBound] = e
         }
         return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards, history: $0.history) }, unplaced)

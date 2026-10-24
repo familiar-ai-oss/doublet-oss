@@ -589,6 +589,8 @@ struct NoteCard: Equatable {
     /// While it's being answered: by whom.
     var waiting: String = "Claude is answering…"
     var resolved = false
+    /// What it's about in at most three words, for its pill on the native page.
+    var gist: String? = nil
 }
 
 /// A diagram that explains lines of a file, as the file shows it: a stripe beside the lines it explains, a mark on the

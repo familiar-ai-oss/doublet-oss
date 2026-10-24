@@ -209,9 +209,9 @@ private final class Pill: UIView, ZoomDrawn {
 
     convenience init(history: [NoteCard], state: String) {
         let last = history.last!
-        let mark = state == "open" ? "✎" : state == "answered" ? "✓" : "✓"
+        let mark = state == "open" ? "✎" : "✓"
         let more = history.count > 1 ? "  ·  \(history.count)" : ""
-        self.init(text: "\(mark) \(last.question)\(more)", accent: state == "resolved" ? .secondaryLabel : .systemBlue)
+        self.init(text: "\(mark) \(last.gist ?? NoteGist.fallback(last.question))\(more)", accent: state == "resolved" ? .secondaryLabel : .systemBlue)
     }
 
     required init?(coder: NSCoder) { fatalError() }
