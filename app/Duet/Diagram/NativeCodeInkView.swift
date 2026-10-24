@@ -49,7 +49,7 @@ enum CodePalette {
 /// The canvas is the page: an opaque, untransformed `PKCanvasView` that scrolls and zooms itself (its frame stays
 /// screen-sized and the page lives in its content size), with the code drawn natively behind the ink. The Pencil
 /// talks only to the canvas; fingers scroll and pinch.
-final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteractionDelegate, UIScribbleInteractionDelegate {
+final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteractionDelegate {
     private let canvas = PKCanvasView()
     private let code = UITextView(usingTextLayoutManager: true)
     private var picker: PKToolPicker?
@@ -59,8 +59,6 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteraction
     /// The zoom the code was last drawn at. While a pinch goes on the code is scaled to follow, then drawn again
     /// at the new size once it ends, so it's sharp at rest (the ink is PencilKit's, sharp at every zoom).
     private var drawnZoom: CGFloat = 1
-    /// The tool before a squeeze picked the eraser: the next squeeze goes back to it.
-    private var beforeEraser: String?
 
     private static let fontSize: CGFloat = 13
     private static let lineHeight: CGFloat = 20
@@ -105,7 +103,6 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteraction
         addSubview(canvas)
         // Strokes are ink, never text input.
         for v in [canvas, code] as [UIView] { v.addInteraction(UIScribbleInteraction(delegate: self)) }
-        addInteraction(UIPencilInteraction(delegate: self))
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawCode() }
     }
 
@@ -137,6 +134,9 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteraction
         // First responder: the palette shows for it, and undo (three-finger swipe, two- and three-finger taps, the
         // palette's buttons) reaches the canvas.
         canvas.becomeFirstResponder()
+        // The palette is out from the start, as in Notes. PencilKit does the Pencil's double-tap and squeeze (what
+        // the user picked in Settings) only while it shows; handling squeeze here as well fought it.
+        p.setVisible(true, forFirstResponder: canvas)
     }
 
     override func layoutSubviews() {
@@ -227,7 +227,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteraction
     // MARK: - Canvas
 
     func canvasViewDidBeginUsingTool(_ canvasView: PKCanvasView) {
-        // The palette stays out of the way until the Pencil writes, or Pencil Tools asks for it.
+        // Back out if it was put away with Pencil Tools.
         if let picker, !picker.isVisible { picker.setVisible(true, forFirstResponder: canvas) }
     }
 
@@ -237,21 +237,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIPencilInteraction
         if abs(scale - drawnZoom) > 0.01 { drawCode() }
     }
 
-    // MARK: - Pencil
-
-    /// A squeeze picks the eraser, and the next one goes back to the tool before it, through the palette so it shows
-    /// what's picked (the canvas follows the palette).
-    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
-        guard squeeze.phase == .ended, let picker,
-              let eraser = picker.toolItems.first(where: { $0 is PKToolPickerEraserItem }) else { return }
-        if picker.selectedToolItemIdentifier == eraser.identifier {
-            let back = beforeEraser ?? picker.toolItems.first { $0 is PKToolPickerInkingItem }?.identifier
-            if let back { picker.selectedToolItemIdentifier = back }
-        } else {
-            beforeEraser = picker.selectedToolItemIdentifier
-            picker.selectedToolItemIdentifier = eraser.identifier
-        }
-    }
+    // MARK: - Scribble
 
     func scribbleInteraction(_ interaction: UIScribbleInteraction, shouldBeginAt location: CGPoint) -> Bool { false }
 }
