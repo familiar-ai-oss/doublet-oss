@@ -119,7 +119,7 @@ enum CodePalette {
 /// The canvas is the page: an untransformed `PKCanvasView` that scrolls and zooms itself (its frame stays
 /// screen-sized and the page lives in its content size), with the code drawn natively behind the ink. The Pencil
 /// talks only to the canvas; fingers scroll and pinch.
-final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteractionDelegate {
+final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserver, UIPencilInteractionDelegate, UIScribbleInteractionDelegate {
     private let canvas = PKCanvasView()
     private let code = UITextView(usingTextLayoutManager: true)
     private(set) lazy var notes = InkNoteTaker(canvas: canvas)
@@ -138,6 +138,11 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
     private var selectedLine: Int?
     /// A line to show once the file is up.
     private var pendingReveal: Int?
+    /// The palette's tool now and the one before it, and when it last changed: for the Pencil's squeeze and double-tap.
+    private var tool: String?
+    private var previousTool: String?
+    private var toolChanged: CFTimeInterval = 0
+    private var squeezeBegan: CFTimeInterval = 0
     /// The last tap, to tell a double tap's second tap from a new one.
     private var lastTap: (time: CFTimeInterval, at: CGPoint)?
     private var geometry = CodePageGeometry(lineCount: 1, columns: 1, advance: 8)
@@ -205,6 +210,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
         addSubview(canvas)
         // Strokes are ink, never text input.
         for v in [canvas, code] as [UIView] { v.addInteraction(UIScribbleInteraction(delegate: self)) }
+        // The Pencil's squeeze and double-tap, as Settings says (see `pencilInteraction`).
+        canvas.addInteraction(UIPencilInteraction(delegate: self))
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (self: Self, _) in self.drawCode() }
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (self: Self, _) in self.resize() }
         // Fingers pick: one tap picks a line or opens what's tapped, two zoom in or back out. (The Pencil only draws.)
@@ -339,19 +346,21 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
             // Leaving the screen: the palette goes with it (it's shared with the window's other pages).
             picker?.setVisible(false, forFirstResponder: canvas)
             picker?.removeObserver(canvas)
+            picker?.removeObserver(self)
             canvas.resignFirstResponder()
             return
         }
         let p = CodePalette.picker(for: window)
         picker = p
         p.addObserver(canvas)
+        p.addObserver(self)
+        tool = p.selectedToolItemIdentifier
         // Start from the palette's own (remembered) tool.
         if let tool = p.selectedToolItem.tool { canvas.tool = tool }
         // First responder: the palette shows for it, and undo (three-finger swipe, two- and three-finger taps, the
         // palette's buttons) reaches the canvas.
         canvas.becomeFirstResponder()
-        // The palette is out from the start, as in Notes. PencilKit does the Pencil's double-tap and squeeze (what
-        // the user picked in Settings) only while it shows; handling squeeze here as well fought it.
+        // The palette is out from the start, as in Notes.
         p.setVisible(true, forFirstResponder: canvas)
     }
 
@@ -657,6 +666,58 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, UIScribbleInteracti
 
     func scrollViewDidEndZooming(_ scrollView: UIScrollView, with view: UIView?, atScale scale: CGFloat) {
         if abs(scale - drawnZoom) > 0.01 { drawCode() }
+    }
+
+    // MARK: - Pencil
+
+    func toolPickerSelectedToolItemDidChange(_ toolPicker: PKToolPicker) {
+        let now = toolPicker.selectedToolItemIdentifier
+        guard now != tool else { return }
+        previousTool = tool
+        tool = now
+        toolChanged = CACurrentMediaTime()
+    }
+
+    /// The squeeze does what Settings says (switch to the eraser and back, say). The palette does that
+    /// itself when it gets the squeeze, but the window's own squeeze handler (a side chat, `SqueezeForSideChat`) can
+    /// take it first, and then nothing happened. So the page does it, unless the palette already has: a tool change
+    /// since the squeeze began means it did, and doing it again would switch straight back.
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze) {
+        switch squeeze.phase {
+        case .began: squeezeBegan = CACurrentMediaTime()
+        case .ended:
+            let since = squeezeBegan > 0 ? squeezeBegan : CACurrentMediaTime()
+            squeezeBegan = 0
+            DispatchQueue.main.async { self.perform(UIPencilInteraction.preferredSqueezeAction, unlessChangedSince: since - 0.05) }
+        default: break
+        }
+    }
+
+    /// A double-tap, the same way.
+    func pencilInteraction(_ interaction: UIPencilInteraction, didReceiveTap tap: UIPencilInteraction.Tap) {
+        let since = CACurrentMediaTime() - 0.05
+        DispatchQueue.main.async { self.perform(UIPencilInteraction.preferredTapAction, unlessChangedSince: since) }
+    }
+
+    private func perform(_ action: UIPencilPreferredAction, unlessChangedSince since: CFTimeInterval) {
+        guard let picker, toolChanged < since else { return }
+        let current = picker.selectedToolItemIdentifier
+        let eraser = picker.toolItems.first { $0 is PKToolPickerEraserItem }?.identifier
+        let pen = picker.toolItems.first { $0 is PKToolPickerInkingItem }?.identifier
+        switch action {
+        case .switchEraser:
+            guard let eraser else { return }
+            let to = current == eraser ? (previousTool.flatMap { $0 == eraser ? nil : $0 } ?? pen) : eraser
+            if let to { picker.selectedToolItemIdentifier = to }
+        case .switchPrevious:
+            if let back = previousTool { picker.selectedToolItemIdentifier = back }
+        case .showColorPalette, .showInkAttributes, .showContextualPalette:
+            if !picker.isVisible { picker.setVisible(true, forFirstResponder: canvas) }
+        default:
+            break
+        }
+        // Set here, the change doesn't always reach the observer: keep track the same way.
+        toolPickerSelectedToolItemDidChange(picker)
     }
 
     // MARK: - Scribble
