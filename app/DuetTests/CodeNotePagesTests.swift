@@ -175,6 +175,8 @@ struct CodeNotePagesTests {
         var book = tagged().book
         book.paper = 72
         book.save(key: "file-/p/a.swift", folder: folder)
+        // Kept with the module it's on, so every module's notes can be listed together.
+        book.module = "/p/a.swift"
         #expect(CodeNoteBook.load(key: "file-/p/a.swift", geometry: geometry, folder: folder) == book)
         #expect(CodeNoteBook.load(key: "file-/p/b.swift", geometry: geometry, folder: folder).drafts.isEmpty)
     }

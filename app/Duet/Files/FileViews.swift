@@ -314,6 +314,8 @@ struct FileViewer: View {
     @AppStorage("nativeCodePage") private var nativeCode = false
     /// The tags the code pages are seen through, shared across files.
     @State private var tags = NoteTags.shared
+    /// Once there are many tags: the ones Apple Intelligence says matter for this file and what's being written.
+    @State private var relevant: [String] = []
     /// A tag being renamed (or made), and its new name.
     @State private var renaming: String?
     @State private var newName = ""
@@ -600,23 +602,33 @@ struct FileViewer: View {
             // Another tag: the notes written under this one are offered for tagging first.
             Picker("Tag", selection: Binding(get: { tags.current }, set: { reviewTags(); tags.pick($0) })) {
                 Text("All Notes").tag(String?.none)
-                if !ranked.here.isEmpty {
+                // Write freely: nothing there is filed or reviewed.
+                Label("Scratchpad", systemImage: "scribble").tag(Optional(NoteTags.scratchpad))
+                if !relevant.isEmpty {
+                    // Many tags: the few that matter here, then the rest out of the way.
+                    Section("Suggested Here") { ForEach(relevant, id: \.self) { Text($0).tag(Optional($0)) } }
+                } else if !ranked.here.isEmpty {
                     Section("On This File") { ForEach(ranked.here, id: \.self) { Text($0).tag(Optional($0)) } }
                 }
-                if !ranked.other.isEmpty {
-                    Section("Other Tags") { ForEach(ranked.other.prefix(12), id: \.self) { Text($0).tag(Optional($0)) } }
+                let rest = (relevant.isEmpty ? ranked.other : ranked.here + ranked.other).filter { !relevant.contains($0) }
+                if !rest.isEmpty {
+                    Section(relevant.isEmpty ? "Other Tags" : "More") { ForEach(rest.prefix(40), id: \.self) { Text($0).tag(Optional($0)) } }
                 }
             }
             Divider()
             Button("New Tag…", systemImage: "plus") { newName = ""; renaming = "" }
-            if let current = tags.current {
+            if let current = tags.current, !tags.onScratchpad {
                 Button("Rename “\(current)”…", systemImage: "pencil") { newName = current; renaming = current }
                 Button("Delete “\(current)”", systemImage: "trash", role: .destructive) { tags.delete(current) }
             }
             Divider()
             // Long lines wrap on the file's paper, cut to the width it was first shown at; this cuts it again.
             Button("Reflow to This Width", systemImage: "text.alignleft") { nativeInk.reflow() }
-        } label: { Label(tags.current ?? "All Notes", systemImage: "tag") }
+        } label: {
+            Label(tags.onScratchpad ? "Scratchpad" : tags.current ?? "All Notes", systemImage: tags.onScratchpad ? "scribble" : "tag")
+        }
+            // With many tags, Apple Intelligence picks the ones for this file and what's being written (after lift).
+            .task(id: "\(path)|\(tags.all.count)|\(drafts.last?.id ?? "")") { await rankTags() }
             .labelStyle(.titleAndIcon)
             .help("See this file's notes through one tag. New notes are filed under it.")
             .alert(renaming == "" ? "New Tag" : "Rename Tag", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
@@ -632,10 +644,24 @@ struct FileViewer: View {
     }
     #endif
 
+    /// Above this many tags, the menu leads with the ones Apple Intelligence picks for this file.
+    private static let manyTags = 12
+
+    private func rankTags() async {
+        #if os(iOS)
+        guard tags.all.count > Self.manyTags else { relevant = []; return }
+        let apple = model.apple
+        let asking = drafts.last.map { $0.reading?.text ?? $0.raw ?? "" } ?? ""
+        let code = file?.text.map { String($0.prefix(600)) } ?? ""
+        relevant = await apple.relevantTags(all: tags.all, module: path, code: code, asking: asking) ?? []
+        #endif
+    }
+
     /// The notes written here since the last review, offered for tagging (switching tag or file, or closing the page).
     private func reviewTags() {
         #if os(iOS)
-        guard nativePage, model.tagReview == nil else { return }
+        // The scratchpad isn't filed.
+        guard nativePage, model.tagReview == nil, !tags.onScratchpad else { return }
         let notes = nativeInk.unreviewed()
         guard !notes.isEmpty else { return }
         TagSuggestions.shared.prepare(notes)

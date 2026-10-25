@@ -9,6 +9,10 @@ final class NoteTags {
     static let shared = NoteTags()
     /// At most this many tags on one note.
     nonisolated static let limit = 5
+    /// The module's scratchpad, as a tag no one can type (it starts with a control character): ink there is never
+    /// filed, reviewed or offered as a tag.
+    nonisolated static let scratchpad = "\u{1}scratchpad"
+    var onScratchpad: Bool { current == Self.scratchpad }
 
     /// Every tag, most recently used first.
     private(set) var all: [String]
@@ -30,6 +34,11 @@ final class NoteTags {
 
     /// See the pages through this tag (nil: everything).
     func pick(_ tag: String?) {
+        if tag == Self.scratchpad {
+            current = tag
+            defaults.set(tag, forKey: Self.currentKey)
+            return
+        }
         let tag = tag.flatMap(Self.clean)
         if let tag { use([tag]) }
         current = tag
@@ -38,7 +47,7 @@ final class NoteTags {
 
     /// These tags were just given to a note: they move to the front (new ones are added).
     func use(_ tags: [String]) {
-        let tags = tags.compactMap(Self.clean)
+        let tags = tags.filter { $0 != Self.scratchpad }.compactMap(Self.clean)
         guard !tags.isEmpty else { return }
         all = tags + all.filter { !tags.contains($0) }
         defaults.set(all, forKey: Self.allKey)
@@ -65,12 +74,13 @@ final class NoteTags {
 
     /// A tag as typed: trimmed, at most 40 characters, nil when empty.
     nonisolated static func clean(_ name: String) -> String? {
-        let n = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        let n = name.trimmingCharacters(in: .whitespacesAndNewlines.union(.controlCharacters))
         return n.isEmpty ? nil : String(n.prefix(40))
     }
 
     /// The dropdown's order: the tags used on this file first (most used first), then the rest, most recent first.
     func ranked(onFile: [String]) -> (here: [String], other: [String]) {
+        let onFile = onFile.filter { $0 != Self.scratchpad }
         let here = onFile.filter { all.contains($0) } + onFile.filter { !all.contains($0) }
         return (here, all.filter { !onFile.contains($0) })
     }

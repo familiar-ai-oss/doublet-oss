@@ -24,6 +24,8 @@ struct DraftNote: Identifiable, Equatable, Codable {
     var tags: [String]?
     /// Its tags were confirmed in a review (or by hand): no more suggestions for it.
     var tagsReviewed: Bool?
+    /// When it was written (nil: before notes kept the time), so notes can be seen over time.
+    var createdAt: Date?
     var id: String { note.id }
 }
 

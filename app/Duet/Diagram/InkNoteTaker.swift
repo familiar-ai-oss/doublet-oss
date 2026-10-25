@@ -262,6 +262,7 @@ final class InkNoteTaker {
                                   diff: true, letterHeight: InkGeometry.letterHeight(strokes.map(\.renderBounds)))
         }
         var draft = DraftNote(note: note, strokeIDs: Set(ids), bounds: box)
+        draft.createdAt = .now
         draft.span = span
         // Where its line is, so its ink can follow it when the page is laid out again.
         if let line = note.lines?.first?.start, let a = anchors.first(where: { $0.line == line }) { draft.tagged = [Self.lineKey: CGPoint(x: 0, y: a.rect.minY)] }

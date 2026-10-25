@@ -1,4 +1,5 @@
 #if os(iOS)
+import DuetKit
 import Foundation
 import PencilKit
 
@@ -15,6 +16,8 @@ struct CodeNoteBook: Codable, Equatable {
     var lineHeight: CGFloat?
     /// The paper's width in characters: long lines wrap inside it (nil: not chosen yet).
     var paper: Int?
+    /// The module (file path) these notes are on, kept with them so every module's notes can be listed together.
+    var module: String?
 
     static let earlierName = "Earlier notes"
 
@@ -43,6 +46,8 @@ struct CodeNoteBook: Codable, Equatable {
         var notes = drafts.filter { !shown.drafts.contains($0.id) }
         for var d in now {
             if let tag, d.tags?.isEmpty ?? true { d.tags = [tag] }
+            // The scratchpad isn't filed: nothing to review there.
+            if tag == NoteTags.scratchpad { d.tagsReviewed = true }
             notes.append(d)
         }
         drafts = notes
@@ -89,6 +94,27 @@ struct CodeNoteBook: Codable, Equatable {
             changed = true
         }
         return changed
+    }
+
+    /// This module's notes as the cross-module views see them (by tag, over time).
+    func entries(module: String) -> [NoteEntry] {
+        drafts.map { d in
+            let tags = d.tags ?? []
+            return NoteEntry(id: d.id, module: module, tags: tags.filter { $0 != NoteTags.scratchpad }, createdAt: d.createdAt,
+                             text: d.reading?.text ?? d.raw ?? d.note.text ?? "", question: d.note.intent == .question,
+                             scratch: tags.contains(NoteTags.scratchpad))
+        }
+    }
+
+    /// Every module's kept notes, for seeing them by tag or combination of tags, and over time. Reads the files: call
+    /// it off the main thread.
+    static func allEntries(folder: URL? = folder) -> [NoteEntry] {
+        guard let folder, let files = try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: nil) else { return [] }
+        return files.filter { $0.lastPathComponent.hasPrefix("code-") }.flatMap { url -> [NoteEntry] in
+            guard let data = try? Data(contentsOf: url), let book = try? JSONDecoder().decode(CodeNoteBook.self, from: data),
+                  let module = book.module else { return [] }
+            return book.entries(module: module)
+        }
     }
 
     private static func unique(_ tags: [String]) -> [String] { tags.reduce(into: []) { if !$0.contains($1) { $0.append($1) } } }
@@ -175,7 +201,9 @@ struct CodeNoteBook: Codable, Equatable {
     }
 
     func save(key: String, folder: URL? = folder) {
-        guard let folder, let data = try? JSONEncoder().encode(self) else { return }
+        var book = self
+        if key.hasPrefix("file-") { book.module = String(key.dropFirst(5)) }
+        guard let folder, let data = try? JSONEncoder().encode(book) else { return }
         try? data.write(to: Self.url("code-\(key)", in: folder), options: .atomic)
     }
 

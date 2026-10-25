@@ -410,6 +410,30 @@ final class AppleIntelligence {
         return r.content.tags
     }
 
+    /// The few tags that matter for what's on screen.
+    @Generable
+    struct RelevantTags {
+        @Guide(description: "Up to eight of the listed tags, most relevant first, copied exactly as listed.", .maximumCount(8))
+        var tags: [String]
+    }
+
+    /// Of many tags, the ones that matter for this module and what the user is writing or typing now, most relevant
+    /// first, only from `all` (nil when the model is unavailable or busy). Inputs go in the prompt.
+    func relevantTags(all: [String], module: String, code: String, asking: String) async -> [String]? {
+        guard model.isAvailable, await free(within: .seconds(4)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        A developer files notes on code under tags. From their tags, pick the ones most relevant to the file they are \
+        on and what they are writing or searching for now, most relevant first. Only pick tags from the list, spelled \
+        exactly as listed. Match by meaning, not spelling: "security" is relevant to "cyber".
+        """)
+        var input = "File: \(module)\n\nCode:\n\(code.prefix(600))"
+        if !asking.isEmpty { input += "\n\nWriting or searching for:\n\(asking.prefix(300))" }
+        input += "\n\nTags: " + all.prefix(150).joined(separator: ", ")
+        guard let r = try? await session.respond(to: input, generating: RelevantTags.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        let known = Dictionary(all.map { ($0.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
+        return r.content.tags.compactMap { known[$0.lowercased()] }.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+    }
+
     func route(_ text: String) async -> Route? {
         if let r = routes[text] { return r }
         guard model.isAvailable, await free(within: .seconds(2)) else { return nil }
