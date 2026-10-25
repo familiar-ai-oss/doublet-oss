@@ -366,6 +366,74 @@ final class AppleIntelligence {
         return OnDeviceText.title(raw)
     }
 
+    /// A note's subject for its pill beside the code.
+    @Generable
+    struct NoteSubject {
+        @Guide(description: "At most 3 words saying what the note asks or says. Code names exactly as written.")
+        var subject: String
+    }
+
+    /// What a handwritten note on a line of code is about, in at most three words (nil when the model is unavailable
+    /// or busy). The note, its code and the answer's first sentence go in the prompt, never the instructions.
+    func noteGist(note: String, code: String, answer: String?) async -> String? {
+        guard model.isAvailable, await free(within: .seconds(8)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        You label a developer's note on a line of code for a small button beside the code. Give the note's subject in \
+        at most three words, so they know what they'd open. Use code names exactly as written.
+        """)
+        var input = "Note:\n\(note.prefix(400))\n\nCode:\n\(code.prefix(800))"
+        if let answer, !answer.isEmpty { input += "\n\nAnswer:\n\(answer.prefix(300))" }
+        guard let r = try? await session.respond(to: input, generating: NoteSubject.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        return NoteGist.clean(r.content.subject)
+    }
+
+    /// Tags for a note, to suggest when its page is left.
+    @Generable
+    struct NoteTagging {
+        @Guide(description: "One to five short tags filing the note by what it's about (security, storage, call map...). Reuse an existing tag whenever one fits.", .maximumCount(5))
+        var tags: [String]
+    }
+
+    /// Up to five tags for a note on code, preferring the user's existing tags (nil when the model is unavailable or
+    /// busy). The note, its code, the answer's start and the existing tags go in the prompt, never the instructions.
+    func suggestTags(note: String, code: String, answer: String?, existing: [String]) async -> [String]? {
+        guard model.isAvailable, await free(within: .seconds(8)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        You file a developer's notes on code under tags, so they can later see all their notes on one subject \
+        (security, storage, a call map, architecture, learning, ideas...). Suggest one to five short lowercase tags \
+        for the note. Reuse the existing tags exactly as written whenever one fits; make a new tag only when none does.
+        """)
+        var input = "Note:\n\(note.prefix(400))\n\nCode:\n\(code.prefix(800))"
+        if let answer, !answer.isEmpty { input += "\n\nAnswer:\n\(answer.prefix(300))" }
+        input += "\n\nExisting tags: " + (existing.isEmpty ? "none yet" : existing.prefix(40).joined(separator: ", "))
+        guard let r = try? await session.respond(to: input, generating: NoteTagging.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        return r.content.tags
+    }
+
+    /// The few tags that matter for what's on screen.
+    @Generable
+    struct RelevantTags {
+        @Guide(description: "Up to eight of the listed tags, most relevant first, copied exactly as listed.", .maximumCount(8))
+        var tags: [String]
+    }
+
+    /// Of many tags, the ones that matter for this module and what the user is writing or typing now, most relevant
+    /// first, only from `all` (nil when the model is unavailable or busy). Inputs go in the prompt.
+    func relevantTags(all: [String], module: String, code: String, asking: String) async -> [String]? {
+        guard model.isAvailable, await free(within: .seconds(4)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        A developer files notes on code under tags. From their tags, pick the ones most relevant to the file they are \
+        on and what they are writing or searching for now, most relevant first. Only pick tags from the list, spelled \
+        exactly as listed. Match by meaning, not spelling: "security" is relevant to "cyber".
+        """)
+        var input = "File: \(module)\n\nCode:\n\(code.prefix(600))"
+        if !asking.isEmpty { input += "\n\nWriting or searching for:\n\(asking.prefix(300))" }
+        input += "\n\nTags: " + all.prefix(150).joined(separator: ", ")
+        guard let r = try? await session.respond(to: input, generating: RelevantTags.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        let known = Dictionary(all.map { ($0.lowercased(), $0) }, uniquingKeysWith: { a, _ in a })
+        return r.content.tags.compactMap { known[$0.lowercased()] }.reduce(into: []) { if !$0.contains($1) { $0.append($1) } }
+    }
+
     func route(_ text: String) async -> Route? {
         if let r = routes[text] { return r }
         guard model.isAvailable, await free(within: .seconds(2)) else { return nil }

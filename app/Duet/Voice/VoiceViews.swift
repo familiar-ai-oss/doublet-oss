@@ -302,6 +302,9 @@ struct VoiceSettingsSection: View {
     @AppStorage(VoiceSettings.cleanUp) private var cleanUp = true
     @AppStorage(VoiceSettings.preset) private var preset = SpeechPreset.accurate.rawValue
     @State private var languages: [Locale] = []
+    /// The installed voices for the spoken language, best first: listed off the main thread, because asking for them
+    /// waits on the speech service (seconds when it's starting up, and for ever on a simulator where it's down).
+    @State private var voices: [(id: String, name: String)] = []
 
     private var spoken: String { language.isEmpty ? Locale.current.identifier : language }
 
@@ -313,9 +316,9 @@ struct VoiceSettingsSection: View {
             }
             Picker("Voice", selection: $voiceID) {
                 Text("Best installed").tag("")
-                ForEach(Synthesizer.voices(language: spoken), id: \.identifier) { v in
-                    Text(v.quality == .premium ? "\(v.name) (Premium)" : v.quality == .enhanced ? "\(v.name) (Enhanced)" : v.name).tag(v.identifier)
-                }
+                ForEach(voices, id: \.id) { Text($0.name).tag($0.id) }
+                // The chosen voice keeps its place while the list loads.
+                if !voiceID.isEmpty, !voices.contains(where: { $0.id == voiceID }) { Text("Chosen voice").tag(voiceID) }
             }
             LabeledContent("Speaking rate") {
                 Slider(value: $rate, in: 0.42...0.62) { Text("Speaking rate") } minimumValueLabel: {
@@ -349,6 +352,14 @@ struct VoiceSettingsSection: View {
             Text("Doublet hears you with Apple's on-device speech recognition, the model Notes and Voice Memos use, so your voice never leaves this device. Accurate waits a moment longer before showing words; Fast shows them sooner. With Clean up on, Apple Intelligence tidies each sentence on this device the way Advanced Dictation does: fillers and repeated words go, a correction (\"the lexer, no wait, the parser\") is applied, and names, paths and numbers stay exactly as said. Undo puts back your words as you said them. In Talk mode a pause sends what you said, a little later after \"and\" or \"um\". A long reply is read up to about 70 words, and the rest stays on screen. For a more natural voice, download an Enhanced or Premium one in Settings › Accessibility › Spoken Content › Voices.")
         }
         .task { languages = await Recognizer.languages().sorted { name($0.identifier) < name($1.identifier) } }
+        .task(id: spoken) {
+            let lang = spoken
+            voices = await Task.detached(priority: .utility) {
+                Synthesizer.voices(language: lang).map { v in
+                    (v.identifier, v.quality == .premium ? "\(v.name) (Premium)" : v.quality == .enhanced ? "\(v.name) (Enhanced)" : v.name)
+                }
+            }.value
+        }
     }
 
     private func name(_ id: String) -> String { Locale.current.localizedString(forIdentifier: id) ?? id }

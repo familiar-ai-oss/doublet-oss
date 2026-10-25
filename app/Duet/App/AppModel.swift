@@ -969,8 +969,14 @@ final class AppModel {
         case .approve: feel(.approved)
         case .reject: feel(.rejected)
         case .interrupt: feel(.stopped)
-        // A question, written or typed on a page: its answer comes as a sticky note where you are.
-        case .notes(_, let items, _, _): for n in items where n.intent == .question { stick(.note(n.id), question: n.text) }
+        // A question, written or typed on a page: its answer comes as a sticky note where you are; on a native code
+        // page it opens under its line instead. Either way Needs you lists it once it's answered, until it's seen.
+        case .notes(let surface, let items, _, _):
+            for n in items where n.intent == .question {
+                awaitAnswer(n.id)
+                if case .file = surface, UserDefaults.standard.bool(forKey: "nativeCodePage") { continue }
+                stick(.note(n.id), question: n.text)
+            }
         default: break
         }
         Task {
@@ -1765,6 +1771,32 @@ final class AppModel {
 
     /// Answers as sticky notes where you asked (Stickies.swift), oldest first.
     var stickies: [Sticky] = []
+
+    #if os(iOS)
+    /// Notes offered for tagging as their code page was left (one review at a time).
+    var tagReview: TagReview?
+    #endif
+
+    /// Questions asked from this device whose answers haven't been seen yet (kept across launches).
+    private(set) var awaitingAnswers: Set<String> = Set(UserDefaults.standard.stringArray(forKey: "answers.awaiting") ?? [])
+
+    /// Answers to questions asked here, not yet seen: Needs you lists each until it's opened, then it leaves.
+    var newAnswers: [Annotation] {
+        awaitingAnswers.compactMap { store.annotations[$0] }.filter { $0.answered && $0.deleted != true }.sorted { $0.ts > $1.ts }
+    }
+
+    private func awaitAnswer(_ id: String) {
+        awaitingAnswers.insert(id)
+        UserDefaults.standard.set(Array(awaitingAnswers), forKey: "answers.awaiting")
+    }
+
+    /// These answers were seen (opened under their line, or their thread): they leave Needs you.
+    func sawAnswers(_ ids: some Sequence<String>) {
+        let seen = awaitingAnswers.intersection(ids).filter { store.annotations[$0]?.answered ?? true }
+        guard !seen.isEmpty else { return }
+        awaitingAnswers.subtract(seen)
+        UserDefaults.standard.set(Array(awaitingAnswers), forKey: "answers.awaiting")
+    }
 
     /// The user's other devices, to send a place to: those with Duet open first. (Sample ones in demo runs.)
     var sendTargets: [DeviceInfo] {

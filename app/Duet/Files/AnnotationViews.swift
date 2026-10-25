@@ -124,6 +124,9 @@ struct AnnotationDetail: View {
     /// A window's own stack, when it's pushed in one.
     @Environment(FilesStack.self) private var filesStack: FilesStack?
     let id: String
+    /// Another note on the same file, stepped to with the arrows or picked from its history: shown in this tab.
+    @State private var stepped: String?
+    @State private var showsHistory = false
     @State private var ink: PlatformImage?
     @State private var confirmDelete = false
     @State private var reply = ""
@@ -131,11 +134,14 @@ struct AnnotationDetail: View {
     @State private var replyProblem: String?
 
     private var compact: Bool { density == .compact }
+    /// The note shown: the tab's, or one stepped to.
+    private var current: String { stepped ?? id }
 
     var body: some View {
-        if let a = model.store.annotations[id] {
+        if let a = model.store.annotations[current] {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
+                    if case .file(let path) = a.surface { onFile(a, path: path) }
                     header(a)
                     if let ink { inkView(ink) }
                     target(a)
@@ -147,14 +153,17 @@ struct AnnotationDetail: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { threadBar(a) }
-            .navigationTitle(model.title(of: .note(id)))
+            .navigationTitle(model.title(of: .note(current)))
+            // Opened, its answer has been seen: it leaves Needs you.
+            .onAppear { model.sawAnswers([current]) }
+            .onChange(of: a.answered) { _, answered in if answered { model.sawAnswers([current]) } }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif
             .toolbar {
                 ToolbarItemGroup {
                     Button(a.resolved ? "Reopen" : "Resolve", systemImage: a.resolved ? "arrow.uturn.backward.circle" : "checkmark.circle") {
-                        model.send(.annotationUpdate(id: id, status: a.resolved ? "open" : "resolved"))
+                        model.send(.annotationUpdate(id: current, status: a.resolved ? "open" : "resolved"))
                     }
                     Menu {
                         Button("Post to the Chat", systemImage: "arrow.up.message") { postToChat(a) }
@@ -164,25 +173,75 @@ struct AnnotationDetail: View {
             }
             .confirmationDialog("Delete this note?", isPresented: $confirmDelete, titleVisibility: .visible) {
                 Button("Delete Note", role: .destructive) {
-                    let conversation = model.conversationPlace(of: .note(id)) ?? .lead
-                    model.send(.annotationUpdate(id: id, delete: true))
+                    let conversation = model.conversationPlace(of: .note(current)) ?? .lead
+                    model.send(.annotationUpdate(id: current, delete: true))
                     // Out of the way: popped off the stack it was pushed on (a window's, the iPhone's), or, in the centre,
                     // its conversation takes the centre again.
                     if let stack = filesStack {
-                        if stack.path.last == .note(id) { stack.path.removeLast() }
+                        if stack.path.last == .note(current) { stack.path.removeLast() }
                     } else if compact {
-                        if model.filesPath.last == .note(id) { model.filesPath.removeLast() }
-                    } else if model.workspace.centre == .note(id) {
+                        if model.filesPath.last == .note(current) { model.filesPath.removeLast() }
+                    } else if model.workspace.centre == .note(current) {
                         model.show(conversation)
                     }
                 }
             } message: {
                 Text("Its handwriting and Claude's answer go with it. The conversation keeps what was said.")
             }
-            .task(id: a.ink) { if a.ink == true { ink = await model.annotationInk(id) } }
+            .task(id: "\(current)|\(a.ink == true)") { ink = nil; if a.ink == true { ink = await model.annotationInk(current) } }
         } else {
             ContentUnavailableView("This note was deleted", systemImage: "trash")
         }
+    }
+
+    /// A note on a file: arrows through the other notes on that file, by line, and where this one is among them; and the
+    /// file's history, every note on it, newest first.
+    @ViewBuilder private func onFile(_ a: Annotation, path: String) -> some View {
+        let all = model.store.annotations(onFile: path)
+        let byLine = all.sorted { ($0.lines?.first?.start ?? 0, $0.ts) < ($1.lines?.first?.start ?? 0, $1.ts) }
+        let i = byLine.firstIndex { $0.id == a.id } ?? 0
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 4) {
+                Button { step(to: byLine[i - 1].id) } label: { Image(systemName: "chevron.left").frame(width: 32, height: 32) }
+                    .disabled(i == 0)
+                    .accessibilityLabel("Previous question")
+                Button { step(to: byLine[i + 1].id) } label: { Image(systemName: "chevron.right").frame(width: 32, height: 32) }
+                    .disabled(i + 1 >= byLine.count)
+                    .accessibilityLabel("Next question")
+                Text("\(i + 1) of \(byLine.count) · \(Paths.name(path))").font(.subheadline).foregroundStyle(.secondary).monospacedDigit()
+                Spacer()
+                Button(showsHistory ? "Hide History" : "History", systemImage: "clock.arrow.circlepath") { showsHistory.toggle() }
+                    .font(.subheadline)
+            }
+            .buttonStyle(.borderless)
+            if showsHistory {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(all.sorted { $0.ts > $1.ts }, id: \.id) { n in
+                        let c = NoteCard.of(n)
+                        Button { step(to: n.id) } label: {
+                            VStack(alignment: .leading, spacing: 3) {
+                                HStack(spacing: 6) {
+                                    if let l = n.lines?.first?.start { Text("Line \(l)").font(.caption.monospacedDigit()).foregroundStyle(.secondary) }
+                                    Text(c.question).font(.subheadline.weight(n.id == a.id ? .semibold : .regular)).lineLimit(2)
+                                }
+                                Text(c.answer ?? (c.resolved ? "Resolved" : c.waiting)).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                            }
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.vertical, 8)
+                            .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                        Divider()
+                    }
+                }
+            }
+        }
+    }
+
+    /// Another note, in this tab.
+    private func step(to other: String) {
+        stepped = other == id ? nil : other
+        showsHistory = false
     }
 
     @ViewBuilder private func header(_ a: Annotation) -> some View {

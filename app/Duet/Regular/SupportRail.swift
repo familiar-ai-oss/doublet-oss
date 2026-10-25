@@ -20,10 +20,11 @@ struct SupportRail: View {
                 NowCard(conversation: conversation)
                 if let c = conversation {
                     WorkCard(conversation: c)
-                    let threads = model.threads(in: c)
-                    if !threads.isEmpty { YourNotesCard(threads: threads) }
+                    // Its side chats. Notes aren't listed here: they live on the code they're about.
+                    let chats = model.threads(in: c).filter { if case .chat = $0 { true } else { false } }
+                    if !chats.isEmpty { YourNotesCard(threads: chats) }
                 } else {
-                    hint("Claude's plan, its workers' changes and your notes show here once a conversation starts.")
+                    hint("Claude's plan, its workers' changes and your side chats show here once a conversation starts.")
                 }
                 // Sessions running outside Duet, on the hub machine: any conversation's business, after this one's.
                 if !model.outsideSessions.isEmpty { RunningElsewhereCard() }
@@ -332,7 +333,7 @@ private struct YourNotesCard: View {
 
     var body: some View {
         let waiting = threads.filter(\.waiting).count
-        RailCard(title: "Your notes", symbol: "pencil.and.scribble", summary: waiting > 0 ? "\(waiting) waiting" : "\(threads.count)",
+        RailCard(title: "Side chats", symbol: "bubble.left.and.bubble.right", summary: waiting > 0 ? "\(waiting) waiting" : "\(threads.count)",
                  tint: .stateNeedsYou, highlight: .stateNeedsYou) {
             ForEach(showsAll ? threads : Array(threads.prefix(4))) { t in
                 Button { model.show(t.place) } label: { ThreadRow(item: t) }

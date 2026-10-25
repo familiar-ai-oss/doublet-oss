@@ -43,6 +43,10 @@ struct RegularRoot: View {
         #endif
         .sheet(isPresented: $model.showPalette) { CommandPalette() }
         .sheet(isPresented: $model.showQuickOpen) { QuickOpen() }
+        #if os(iOS)
+        // Notes written on a code page, offered for tagging as it's left.
+        .sheet(item: $model.tagReview) { TagReviewSheet(review: $0) }
+        #endif
         #if os(macOS)
         // The Mac opens a side chat in a window of its own; this sheet is only for one asked for in place.
         .sheet(item: $model.sideChatSheet) { ref in
@@ -83,13 +87,23 @@ struct Sidebar: View {
     @Environment(AppModel.self) private var model
     @State private var renaming: Conversation?
     @State private var showSettings = false
+    /// The other sessions, the fleet and the terminals, folded into one row until opened.
+    @AppStorage("sidebar.machines") private var machinesOpen = false
 
     var body: some View {
         Group {
             if model.sidebarMode == .explorer { ExplorerSidebar() } else { conversations }
         }
-        // Like an editor's activity bar: the conversations, or Claude's folder as a tree (⌘⇧E).
-        .safeAreaInset(edge: .top, spacing: 0) { SidebarModePicker().padding(.horizontal, 10).padding(.vertical, 6) }
+        // Claude's folder as a tree (⌘⇧E) opens from the Files row; from there, back to the conversations.
+        .safeAreaInset(edge: .top, spacing: 0) {
+            if model.sidebarMode == .explorer {
+                Button { model.sidebarMode = .chats } label: { Label("Conversations", systemImage: "chevron.backward") }
+                    .buttonStyle(.borderless)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .accessibilityIdentifier("sidebar-back-to-conversations")
+            }
+        }
         .safeAreaInset(edge: .bottom) {
             ConnectionFooter()
                 .padding(10)
@@ -121,11 +135,12 @@ struct Sidebar: View {
                     Label {
                         Text("Needs you")
                     } icon: {
-                        Image(systemName: store.attention.isEmpty ? "tray" : "hand.raised.fill")
-                            .foregroundStyle(store.attention.isEmpty ? Color.secondary : Color.stateNeedsYou)
+                        let waiting = store.attention.count + model.newAnswers.count
+                        Image(systemName: waiting == 0 ? "tray" : "hand.raised.fill")
+                            .foregroundStyle(waiting == 0 ? Color.secondary : Color.stateNeedsYou)
                     }
                     .keepsOnDoubleClick(.inbox)
-                    .badge(store.attention.count)
+                    .badge(store.attention.count + model.newAnswers.count)
                 }
                 .accessibilityIdentifier("sidebar-inbox")
             }
@@ -147,32 +162,7 @@ struct Sidebar: View {
                             Button("Open in New Window", systemImage: "macwindow.badge.plus") { model.openWindow(.conversation(c.id)) }
                         }
                         .accessibilityIdentifier(isLive ? "sidebar-lead" : "sidebar-conversation-\(c.id)")
-                    // Its threads under it (notes and side chats), waiting ones first: each opens in the centre.
-                    let threads = model.threads(in: c)
-                    let shown = isLive ? 5 : 3
-                    ForEach(threads.prefix(shown)) { t in
-                        Button { model.show(t.place) } label: { ThreadRow(item: t) }
-                            .buttonStyle(.plain)
-                            .font(.callout)
-                            .padding(.leading, 22)
-                            .contextMenu {
-                                Button("Open to the Right", systemImage: "rectangle.righthalf.inset.filled") { model.openBeside(t.place) }
-                                if case .chat(let chat) = t {
-                                    Button("Open in New Window", systemImage: "macwindow.badge.plus") { model.openWindow(.side(SideChatRef(chatId: chat.id))) }
-                                }
-                            }
-                            .accessibilityIdentifier("sidebar-thread-\(t.id)")
-                    }
-                    if threads.count > shown {
-                        // The rest are on the conversation's Overview.
-                        Button("\(threads.count - shown) more threads") {
-                            model.select(conversation: isLive ? nil : c.id, compact: false)
-                            model.showOverview()
-                        }
-                        .buttonStyle(.plain)
-                        .font(.caption).foregroundStyle(.secondary)
-                        .padding(.leading, 48)
-                    }
+                    // Its notes live on the code they're about, and its side chats inside it: nothing more here.
                 }
                 if live == nil {
                     Label("Waiting for Claude…", systemImage: "bubble.left").foregroundStyle(.secondary)
@@ -189,63 +179,79 @@ struct Sidebar: View {
                         .accessibilityIdentifier("sidebar-new-conversation")
                 }
             }
-            // Claude Code sessions running outside Duet on the hub machine: each opens in the centre, followed live.
-            let elsewhere = model.outsideSessions
-            if !elsewhere.isEmpty {
-                Section {
-                    ForEach(elsewhere.prefix(5)) { s in
-                        Button { model.show(.outside(s.sessionId)) } label: { OutsideRow(session: s) }
-                            .buttonStyle(.plain)
-                            .font(.callout)
-                            .contextMenu {
-                                Button("Open to the Right", systemImage: "rectangle.righthalf.inset.filled") { model.openBeside(.outside(s.sessionId)) }
-                            }
-                            .accessibilityIdentifier("sidebar-outside-\(s.sessionId)")
-                    }
-                    if elsewhere.count > 5 {
-                        Button("\(elsewhere.count - 5) more") { model.showOverview() }
-                            .buttonStyle(.plain)
-                            .font(.caption).foregroundStyle(.secondary)
-                            .padding(.leading, 26)
-                    }
-                } header: {
-                    Text("Running elsewhere")
-                }
-            }
-            // The system area: the fleet as one row (its screen has every worker), and the open terminals.
+            // The rest, at the bottom: Claude's folder, and the machines (sessions running elsewhere, the fleet, the
+            // terminals) folded into one row.
             Section {
-                NavigationLink(value: Destination.fleet) {
+                Button { model.sidebarMode = .explorer } label: { Label("Files", systemImage: "folder") }
+                    .buttonStyle(.plain)
+                    .accessibilityIdentifier("sidebar-files")
+                DisclosureGroup(isExpanded: $machinesOpen) { machines } label: {
                     Label {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Fleet")
-                            Text(model.fleetSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        HStack {
+                            Text("Machines")
+                            Spacer()
+                            if !machinesOpen, let busy = busyMachines { Text(busy).font(.caption).foregroundStyle(.secondary) }
                         }
                     } icon: {
-                        Image(systemName: "cpu")
+                        Image(systemName: "server.rack")
                             .foregroundStyle(store.workers.contains { $0.running != nil } ? Color.stateWorking : Color.secondary)
                     }
-                    .keepsOnDoubleClick(.fleet)
                 }
-                .accessibilityIdentifier("sidebar-fleet")
-                ForEach(store.terminals) { t in
-                    NavigationLink(value: Destination.terminal(t.id)) {
-                        Label(t.title, systemImage: TerminalKinds.symbol(t.kind)).keepsOnDoubleClick(.terminal(t.id))
-                    }
-                    .contextMenu {
-                        Button("Open in New Tab", systemImage: "plus.square.on.square") { model.show(.terminal(t.id), keep: true) }
-                        OpenInWindowButton(terminalId: t.id)
-                        Button("Close", systemImage: "xmark") { model.send(.ptyClose(id: t.id)) }
-                    }
-                }
-            } header: {
-                HStack {
-                    Text("System")
-                    Spacer()
-                    NewTerminalMenu().buttonStyle(.borderless).help("New terminal")
-                }
+                .accessibilityIdentifier("sidebar-machines")
             }
         }
         .listStyle(.sidebar)
+    }
+}
+
+extension Sidebar {
+    /// What's busy among the machines, for the folded row ("2 running"); nil when nothing is.
+    fileprivate var busyMachines: String? {
+        let n = model.store.workers.filter { $0.running != nil }.count + model.outsideSessions.filter { $0.status == "busy" }.count
+        return n == 0 ? nil : "\(n) running"
+    }
+
+    /// Claude Code sessions running outside Duet on the hub machine, the fleet as one row, and the open terminals.
+    @ViewBuilder fileprivate var machines: some View {
+        let store = model.store
+        ForEach(model.outsideSessions.prefix(5)) { s in
+            Button { model.show(.outside(s.sessionId)) } label: { OutsideRow(session: s) }
+                .buttonStyle(.plain)
+                .font(.callout)
+                .contextMenu {
+                    Button("Open to the Right", systemImage: "rectangle.righthalf.inset.filled") { model.openBeside(.outside(s.sessionId)) }
+                }
+                .accessibilityIdentifier("sidebar-outside-\(s.sessionId)")
+        }
+        if model.outsideSessions.count > 5 {
+            Button("\(model.outsideSessions.count - 5) more sessions") { model.showOverview() }
+                .buttonStyle(.plain)
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        NavigationLink(value: Destination.fleet) {
+            Label {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Fleet")
+                    Text(model.fleetSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                }
+            } icon: {
+                Image(systemName: "cpu")
+                    .foregroundStyle(store.workers.contains { $0.running != nil } ? Color.stateWorking : Color.secondary)
+            }
+            .keepsOnDoubleClick(.fleet)
+        }
+        .accessibilityIdentifier("sidebar-fleet")
+        ForEach(store.terminals) { t in
+            NavigationLink(value: Destination.terminal(t.id)) {
+                Label(t.title, systemImage: TerminalKinds.symbol(t.kind)).keepsOnDoubleClick(.terminal(t.id))
+            }
+            .contextMenu {
+                Button("Open in New Tab", systemImage: "plus.square.on.square") { model.show(.terminal(t.id), keep: true) }
+                OpenInWindowButton(terminalId: t.id)
+                Button("Close", systemImage: "xmark") { model.send(.ptyClose(id: t.id)) }
+            }
+        }
+        NewTerminalMenu().buttonStyle(.borderless).font(.callout)
     }
 }
 
@@ -469,9 +475,8 @@ private struct TrailingToolbar: View {
             .accessibilityHidden(true)
             .toolbar {
                 ToolbarItemGroup {
-                    Toggle(isOn: $model.showTerminalPanel) { Label("Terminal", systemImage: "terminal") }
-                        .help("Terminal panel (⌘J)")
-                    InspectorToggle()
+                    // The terminal panel is in a conversation's More menu (and ⌘J).
+                    InspectorToggle().labelStyle(.titleAndIcon)
                 }
                 .visibilityPriority(.high)
             }
@@ -693,30 +698,41 @@ struct LeadScreen: View {
                         .labelStyle(.titleAndIcon)
                         .help("\(isLive ? "Claude works" : "Claude worked") in \(Paths.short(cwd)). Show its files.")
                 }
+                // Claude: its model, effort and mode, in one menu named for the model.
                 if isLive {
-                    LeadModelMenu().labelStyle(.titleAndIcon)
-                    LeadEffortMenu().labelStyle(.titleAndIcon)
-                    LeadModeMenu().labelStyle(.titleAndIcon)
-                }
-            }
-            ToolbarItemGroup {
-                if isLive {
-                    Button("Compact", systemImage: "rectangle.compress.vertical") { model.send(.compact) }
-                        .disabled(store.leadStatus.busy)
-                        .help("Summarize the conversation to free context")
-                    Button("New conversation", systemImage: "plus.bubble") { confirmNew = true }
-                        .disabled(store.leadStatus.busy)
-                        .help("Start a new conversation; this one stays in the sidebar (⇧⌘N)")
+                    Menu {
+                        LeadModelMenu()
+                        LeadEffortMenu()
+                        LeadModeMenu()
+                    } label: { Label(model.leadModelName, systemImage: "sparkles") }
+                        .labelStyle(.titleAndIcon)
+                        .help("Claude's model, effort and permission mode")
                 } else if let id = conversationId {
                     Button("Resume", systemImage: "arrow.uturn.backward.circle") { Task { _ = await model.resume(id) } }
+                        .labelStyle(.titleAndIcon)
                         .disabled(store.leadStatus.busy || model.resumePending == id)
                         .help("Continue this conversation")
                 }
-                if isLive { SideChatToolbarButton() }
-                // This conversation on the iPad (or Mac).
-                SendToDevice(place: isLive ? .lead : conversationId.map { .conversation($0) } ?? .lead)
             }
-            // With what the side stage shows in the toolbar too, these go to its overflow menu first.
+            // Everything else, in one menu.
+            ToolbarItemGroup {
+                Menu {
+                    if isLive {
+                        SideChatToolbarButton()
+                        Button("Compact", systemImage: "rectangle.compress.vertical") { model.send(.compact) }
+                            .disabled(store.leadStatus.busy)
+                            .help("Summarize the conversation to free context")
+                        Button("New Conversation", systemImage: "plus.bubble") { confirmNew = true }
+                            .disabled(store.leadStatus.busy)
+                            .help("Start a new conversation; this one stays in the sidebar (⇧⌘N)")
+                    }
+                    // This conversation on the iPad (or Mac).
+                    SendToDevice(place: isLive ? .lead : conversationId.map { .conversation($0) } ?? .lead)
+                    Toggle(isOn: $model.showTerminalPanel) { Label("Terminal Panel", systemImage: "terminal") }
+                } label: { Label("More", systemImage: "ellipsis.circle") }
+                    .labelStyle(.titleAndIcon)
+                    .accessibilityIdentifier("conversation-more")
+            }
             .visibilityPriority(.low)
         }
         .confirmationDialog("Start a new conversation?", isPresented: $confirmNew, titleVisibility: .visible) {
@@ -769,7 +785,8 @@ struct InboxScreen: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 LeadStatusCard()
-                AttentionList(emptyText: "Nothing needs you right now.")
+                NewAnswers()
+                AttentionList(emptyText: model.newAnswers.isEmpty ? "Nothing needs you right now." : "Nothing else needs you.")
             }
             .frame(maxWidth: 760, alignment: .leading)
             .padding(20)
@@ -780,13 +797,57 @@ struct InboxScreen: View {
     }
 }
 
+/// Answers to questions you asked, not yet seen: one short row each, opening the file at the question's line (where
+/// the answer opens under it). Seen, a row leaves.
+struct NewAnswers: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        let answers = model.newAnswers
+        if !answers.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("New answers").font(.subheadline.weight(.semibold)).foregroundStyle(.secondary)
+                ForEach(answers) { a in
+                    Button { open(a) } label: {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(place(a)).font(.subheadline.weight(.semibold))
+                            Text(FileViewer.gist(a.answer ?? "")).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(12)
+                        .card()
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    /// "Answer on Lexer.swift:21".
+    private func place(_ a: Annotation) -> String {
+        if case .file(let path) = a.surface {
+            return "Answer on \(Paths.name(path))" + (a.lines?.first.map { ":\($0.start)" } ?? "")
+        }
+        return "Answer to “\(NoteGist.fallback(a.text ?? "your question"))”"
+    }
+
+    private func open(_ a: Annotation) {
+        if case .file(let path) = a.surface {
+            model.open(.file(path, line: a.lines?.first?.start), compact: false)
+        } else {
+            model.open(.note(a.id), compact: false)
+        }
+        model.sawAnswers([a.id])
+    }
+}
+
 /// The conversation's cards: the side stage's Overview, or the side stage hidden when that's what it shows already.
 struct InspectorToggle: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
         Toggle(isOn: Binding(get: { model.panelVisible && model.workspace.overviewPane != nil }, set: { _ in model.toggleCards() })) {
-            Label("Conversation details", systemImage: "sidebar.trailing")
+            Label("Details", systemImage: "sidebar.trailing")
         }
         .help("This conversation's Overview: its plan, diagrams, notes and changes, as cards (⌘⌥I)")
         .accessibilityIdentifier("inspector-toggle")

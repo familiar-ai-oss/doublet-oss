@@ -18,6 +18,14 @@ struct DraftNote: Identifiable, Equatable, Codable {
     var raw: String?
     /// Its kind was picked from the menu or the squeeze palette: a reading doesn't change it.
     var chosen: Bool?
+    /// On a native code page: what its mark picked out, and how surely.
+    var span: CodeSpan?
+    /// On a native code page: its tags (up to `NoteTags.limit`), names shared across the codebase.
+    var tags: [String]?
+    /// Its tags were confirmed in a review (or by hand): no more suggestions for it.
+    var tagsReviewed: Bool?
+    /// When it was written (nil: before notes kept the time), so notes can be seen over time.
+    var createdAt: Date?
     var id: String { note.id }
 }
 
@@ -467,6 +475,8 @@ struct InkPanel<Content: View>: View {
 /// that ask for changes go to Claude in the conversation, to act on.
 struct NotesTray: View {
     @Binding var drafts: [DraftNote]
+    /// Whether a squeeze sends them (not on a native code page, where it does what Settings says).
+    var squeezeSends = true
     let onSend: () -> Void
     /// The notes one by one (to change what one means, or delete it): folded away until asked for, so the tray stays a
     /// single line over the page.
@@ -489,7 +499,7 @@ struct NotesTray: View {
                 }
                 .buttonStyle(.borderless)
                 .accessibilityHint(showsNotes ? "Folds the notes away" : "Shows each note, to change what it means or delete it")
-                Text(questions ? "· answered here" : "· or squeeze the Pencil").font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                Text(questions ? "· answered here" : squeezeSends ? "· or squeeze the Pencil" : "").font(.caption).foregroundStyle(.secondary).lineLimit(1)
                 Button(questions ? "Ask" : "Send to Claude", systemImage: questions ? "questionmark.bubble" : "paperplane.fill", action: onSend)
                     .buttonStyle(.borderedProminent)
                     .accessibilityHint(questions ? "Each question becomes a thread on what it's written on, answered there"
@@ -539,7 +549,9 @@ struct PickBar: View {
     var monospaced = false
     /// A diagram element that stands for code: its code.
     var showCode: (() -> Void)? = nil
-    let askHere: (String) -> Void
+    /// A typed question kept as a thread here (nil: none here; on a native code page, questions are written with
+    /// the Pencil, and typed ones go to a side chat).
+    let askHere: ((String) -> Void)?
     let askClaude: () -> Void
     @State private var asking = false
     @State private var question = ""
@@ -555,10 +567,12 @@ struct PickBar: View {
                 if let showCode {
                     Button("Show Code", systemImage: "chevron.left.forwardslash.chevron.right", action: showCode).buttonStyle(.bordered)
                 }
-                Button("Ask Here", systemImage: "questionmark.bubble") { asking.toggle() }
-                    .buttonStyle(.bordered)
-                    .help("A question about \(title), answered beside it and kept as its thread")
-                    .accessibilityIdentifier("ask-here")
+                if askHere != nil {
+                    Button("Ask Here", systemImage: "questionmark.bubble") { asking.toggle() }
+                        .buttonStyle(.bordered)
+                        .help("A question about \(title), answered beside it and kept as its thread")
+                        .accessibilityIdentifier("ask-here")
+                }
                 Button("Ask Claude", systemImage: "bubble.left", action: askClaude)
                     .buttonStyle(.borderedProminent)
                     .help("Ask in the conversation, with \(title) named")
@@ -585,7 +599,7 @@ struct PickBar: View {
 
     private func submit() {
         guard !trimmed.isEmpty else { return }
-        askHere(trimmed)
+        askHere?(trimmed)
         question = ""
         asking = false
     }

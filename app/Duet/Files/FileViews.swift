@@ -309,11 +309,42 @@ struct FileViewer: View {
     @State private var changeIndex = 0
     #if os(iOS)
     @State private var ink = InkController()
+    @State private var nativeInk = NativeInkController()
+    /// Code drawn natively under a canvas that is the page, as in Notes (being built; the web page otherwise).
+    @AppStorage("nativeCodePage") private var nativeCode = false
+    /// The tags the code pages are seen through, shared across files.
+    @State private var tags = NoteTags.shared
+    /// Once there are many tags: the ones Apple Intelligence says matter for this file and what's being written.
+    @State private var relevant: [String] = []
+    /// A tag being renamed (or made), and its new name.
+    @State private var renaming: String?
+    @State private var newName = ""
     #endif
 
     private var pencil: Bool {
         #if os(iOS)
         UIDevice.current.userInterfaceIdiom == .pad
+        #else
+        false
+        #endif
+    }
+
+    /// The notes the tray offers to send: on the native page, not the questions (they ask themselves).
+    private var trayDrafts: Binding<[DraftNote]> {
+        guard nativePage else { return $drafts }
+        return Binding(get: { drafts.filter { !Self.asksItself($0) } },
+                       set: { kept in drafts = drafts.filter { Self.asksItself($0) } + kept })
+    }
+
+    /// A note on the native page that's sent as soon as it's read: a question in words (not one only by ink colour).
+    static func asksItself(_ d: DraftNote) -> Bool {
+        d.span != nil && d.note.intent == .question && (CodeQuestion.asks(d.note.text) || d.reading?.kind == .question)
+    }
+
+    /// The file is on the native page (iPad, with the setting on).
+    private var nativePage: Bool {
+        #if os(iOS)
+        pencil && nativeCode
         #else
         false
         #endif
@@ -346,6 +377,10 @@ struct FileViewer: View {
         #endif
         .paneActions { actions }
         .onAppear {
+            NoteGists.shared.apple = model.apple
+            #if os(iOS)
+            TagSuggestions.shared.apple = model.apple
+            #endif
             page.onTap = { selected = $0 }
             // A note's bubble in the margin: that note (or the notes on that line).
             page.onMark = { ids in push(ids.count == 1 ? .note(ids[0]) : .notes(.file(path))) }
@@ -353,14 +388,18 @@ struct FileViewer: View {
             page.onDiagram = { id, element in model.openDiagram(id, compact: density == .compact, focus: element) }
             if pencil { model.pencilSurfaces += 1 }
         }
-        .onDisappear { if pencil { model.pencilSurfaces -= 1 } }
+        .onDisappear {
+            if pencil { model.pencilSurfaces -= 1 }
+            // The page is left (another file, or closed): its new notes are offered for tagging.
+            reviewTags()
+        }
         .task(id: "\(path)|\(model.store.isConnected)") {
             guard model.store.isConnected || model.isDemo else { return }
             await load()
-            if let line { page.reveal(line: line) }
+            if let line { reveal(line) }
         }
         // Opened again at another line: its tab stays, and shows that line.
-        .onChange(of: line) { _, l in if let l { page.reveal(line: l) } }
+        .onChange(of: line) { _, l in if let l { reveal(l) } }
         // While work goes on in its folder, the file keeps up: its folder is checked every 4 seconds, and the file is
         // read again when it changed.
         .task(id: workGoesOn(in: (path as NSString).deletingLastPathComponent, model.store)) {
@@ -380,6 +419,10 @@ struct FileViewer: View {
         .onChange(of: selected?.id) { model.picked(selected, in: .file(path)) }
         .onChange(of: drafts.isEmpty) { _, empty in if !empty { model.keepOpen(.file(path)) } }
         #if os(iOS)
+        // Tags for each note are worked out as it closes, so the review is ready when the page is left.
+        .onChange(of: drafts) { _, now in if nativePage { TagSuggestions.shared.prepare(now) } }
+        #endif
+        #if os(iOS)
         // Sent here to write on (Write on iPad): the Pencil tools come out.
         .writesWhenSent(.file(path)) { if pencil { ink.showTools() } }
         #endif
@@ -396,25 +439,34 @@ struct FileViewer: View {
     private func marks(_ text: String) -> (marks: [Int: LineMark], unplaced: Int) {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         let rank = ["open": 2, "answered": 1, "resolved": 0]
-        var at: [Int: (ids: [String], state: String, cards: [NoteCard])] = [:]
+        var at: [Int: (ids: [String], state: String, cards: [NoteCard], history: [NoteCard], answering: Bool)] = [:]
         var unplaced = 0
-        for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) {
+        // Seen through a tag: only its notes have marks.
+        let shown: Set<String>? = {
+            #if os(iOS)
+            return nativePage ? nativeInk.shownNotes : nil
+            #else
+            return nil
+            #endif
+        }()
+        for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) where shown?.contains(a.id) ?? true {
             guard let l = a.lines?.first, let r = Reanchor.place(l, in: lines) else { unplaced += 1; continue }
-            var e = at[r.lowerBound] ?? ([], "resolved", [])
+            var e = at[r.lowerBound] ?? ([], "resolved", [], [], false)
+            // Being answered now (or asked a moment ago and not yet picked up): its pill pulses.
+            if a.answering != nil || (a.status == "open" && a.intent == .question && Date().timeIntervalSince(a.date) < 120) { e.answering = true }
             e.ids.append(a.id)
             // The most pressing wins: waiting, then answered, then resolved.
             if rank[a.status, default: 0] > rank[e.state, default: 0] { e.state = a.status }
-            // Not yet resolved: a card under the line, with the answer once there is one.
-            if a.status != "resolved" {
-                let asked = a.text?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                e.cards.append(NoteCard(id: a.id, question: asked.isEmpty ? "Your handwritten note" : asked,
-                                        answer: a.status == "answered" ? Self.gist(a.answer ?? "") : nil,
-                                        chip: a.answered ? AnswerChip.text(for: a) : nil,
-                                        waiting: a.answering == "Claude" ? "Claude is answering…" : a.answering != nil ? "A local model is reading the code…" : "Claude is answering…"))
-            }
+            // Not yet resolved: a card under the line, with the answer once there is one. Every note goes in the
+            // line's history, with a gist for its pill (made on this device; its first words until then).
+            let plain = NoteCard.of(a)
+            let gist = NoteGists.shared.gist(question: plain.question, code: NoteGist.code(around: r.lowerBound, in: lines),
+                                             answer: a.answered ? a.answer.map(NoteGist.firstSentence) : nil)
+            if a.status != "resolved" { e.cards.append(NoteCard(id: plain.id, question: plain.question, answer: a.status == "answered" ? plain.answer : nil, chip: plain.chip, waiting: plain.waiting)) }
+            e.history.append(NoteCard.of(a, gist: gist))
             at[r.lowerBound] = e
         }
-        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards) }, unplaced)
+        return (at.mapValues { LineMark(ids: $0.ids, state: $0.state, cards: $0.cards, history: $0.history, answering: $0.answering) }, unplaced)
     }
 
     /// The start of an answer for its card: its first paragraph of prose, after any "Let me look…" on the way there,
@@ -451,7 +503,23 @@ struct FileViewer: View {
         let doc = DiagramDocument.code(path: f.path, text: f.text ?? "", changed: f.changed ?? [], removedAfter: f.removedAfter ?? [],
                                        marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? ""))
         #if os(iOS)
-        if pencil {
+        if pencil, nativeCode {
+            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts, tag: tags.current,
+                                       decor: CodePageDecor(changed: Set(f.changed ?? []), removedAfter: Set(f.removedAfter ?? []),
+                                                            marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? "")),
+                                       onSelect: { selected = $0 }, onMark: { ids in page.onMark?(ids) },
+                                       onDiagram: { id, element in page.onDiagram?(id, element) },
+                                       onQuestion: { id in Task { await send(only: [id]) } },
+                                       onCancel: { id in
+                                           drafts.removeAll { $0.id == id }
+                                           if model.store.annotations[id] != nil { model.send(.annotationUpdate(id: id, delete: true)) }
+                                       },
+                                       onErased: { id in
+                                           if model.store.annotations[id] != nil { model.send(.annotationUpdate(id: id, delete: true)) }
+                                       },
+                                       onResolve: { ids in for id in ids { model.send(.annotationUpdate(id: id, status: "resolved")) } },
+                                       onSeen: { model.sawAnswers($0) })
+        } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
         } else {
@@ -469,13 +537,14 @@ struct FileViewer: View {
             }
             if let selected, let line = selected.line {
                 PickBar(title: "Line \(line)", symbol: "text.line.first.and.arrowtriangle.forward", monospaced: true,
-                        askHere: { q in
+                        askHere: nativePage ? nil : { q in
                             model.askHere(q, on: .file(path: path), lines: [InkLines(file: path, start: line, end: line, code: selected.label)])
                         },
                         askClaude: { model.askAbout("About \(Paths.short(path)):\(line) (`\(selected.label)`): ", compact: density == .compact) })
             }
-            if pencil, drafts.contains(where: { !$0.sent }) {
-                NotesTray(drafts: $drafts) { Task { await send() } }
+            // On the native page, a question written with the Pencil asks itself: the tray holds the other notes.
+            if pencil, drafts.contains(where: { !$0.sent && !(nativePage && Self.asksItself($0)) }) {
+                NotesTray(drafts: trayDrafts, squeezeSends: !nativePage) { Task { await send() } }
             }
         }
         .background(pencil ? AnyShapeStyle(.clear) : AnyShapeStyle(.bar))
@@ -491,12 +560,18 @@ struct FileViewer: View {
         if let changed = file?.changed, !changed.isEmpty {
             Button("Next Change", systemImage: "arrow.down.to.line") {
                 let starts = changeStarts(changed)
-                page.scrollTo(line: starts[changeIndex % starts.count])
+                let to = starts[changeIndex % starts.count]
+                #if os(iOS)
+                if pencil, nativeCode { nativeInk.scrollTo(line: to) } else { page.scrollTo(line: to) }
+                #else
+                page.scrollTo(line: to)
+                #endif
                 changeIndex += 1
             }
         }
         #if os(iOS)
-        if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { ink.toggleTools() } }
+        if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { nativeCode ? nativeInk.toggleTools() : ink.toggleTools() } }
+        if pencil, nativeCode { tagMenu }
         #endif
         Button("Side Chat", systemImage: "bubble.left.and.bubble.right") { model.openSideChat(about: .file(path: path)) }
             .help("Ask a quick question about this file, beside the conversation (⌘⇧K)")
@@ -512,7 +587,86 @@ struct FileViewer: View {
             if let text = file?.text { Button("Copy Text", systemImage: "doc.on.clipboard") { Pasteboard.copy(text) } }
             Button("Open Shell Here", systemImage: "terminal") { model.openTerminal(.shell, cwd: (path as NSString).deletingLastPathComponent) }
             Button("Reload", systemImage: "arrow.clockwise") { Task { await load() } }
+            #if os(iOS)
+            if pencil { Toggle("Native Page (Prototype)", systemImage: "pencil.and.outline", isOn: $nativeCode) }
+            #endif
         } label: { Label("More", systemImage: "ellipsis.circle") }
+    }
+
+    #if os(iOS)
+    /// The tag the page is seen through: the page's title. Picking one carries over to every file; anything written
+    /// then is filed under it.
+    @ViewBuilder private var tagMenu: some View {
+        let ranked = tags.ranked(onFile: nativeInk.fileTags)
+        Menu {
+            // Another tag: the notes written under this one are offered for tagging first.
+            Picker("Tag", selection: Binding(get: { tags.current }, set: { reviewTags(); tags.pick($0) })) {
+                Text("All Notes").tag(String?.none)
+                // Write freely: nothing there is filed or reviewed.
+                Label("Scratchpad", systemImage: "scribble").tag(Optional(NoteTags.scratchpad))
+                if !relevant.isEmpty {
+                    // Many tags: the few that matter here, then the rest out of the way.
+                    Section("Suggested Here") { ForEach(relevant, id: \.self) { Text($0).tag(Optional($0)) } }
+                } else if !ranked.here.isEmpty {
+                    Section("On This File") { ForEach(ranked.here, id: \.self) { Text($0).tag(Optional($0)) } }
+                }
+                let rest = (relevant.isEmpty ? ranked.other : ranked.here + ranked.other).filter { !relevant.contains($0) }
+                if !rest.isEmpty {
+                    Section(relevant.isEmpty ? "Other Tags" : "More") { ForEach(rest.prefix(40), id: \.self) { Text($0).tag(Optional($0)) } }
+                }
+            }
+            Divider()
+            Button("New Tag…", systemImage: "plus") { newName = ""; renaming = "" }
+            if let current = tags.current, !tags.onScratchpad {
+                Button("Rename “\(current)”…", systemImage: "pencil") { newName = current; renaming = current }
+                Button("Delete “\(current)”", systemImage: "trash", role: .destructive) { tags.delete(current) }
+            }
+            Divider()
+            // Long lines wrap on the file's paper, cut to the width it was first shown at; this cuts it again.
+            Button("Reflow to This Width", systemImage: "text.alignleft") { nativeInk.reflow() }
+        } label: {
+            Label(tags.onScratchpad ? "Scratchpad" : tags.current ?? "All Notes", systemImage: tags.onScratchpad ? "scribble" : "tag")
+        }
+            // With many tags, Apple Intelligence picks the ones for this file and what's being written (after lift).
+            .task(id: "\(path)|\(tags.all.count)|\(drafts.last?.id ?? "")") { await rankTags() }
+            .labelStyle(.titleAndIcon)
+            .help("See this file's notes through one tag. New notes are filed under it.")
+            .alert(renaming == "" ? "New Tag" : "Rename Tag", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+                TextField("Name", text: $newName)
+                Button(renaming == "" ? "Create" : "Rename") {
+                    if let old = renaming { old.isEmpty ? tags.pick(newName) : tags.rename(old, to: newName) }
+                    renaming = nil
+                }
+                Button("Cancel", role: .cancel) { renaming = nil }
+            } message: {
+                if renaming != "" { Text("Renamed on every file. A name that's already a tag merges the two.") }
+            }
+    }
+    #endif
+
+    /// Above this many tags, the menu leads with the ones Apple Intelligence picks for this file.
+    private static let manyTags = 12
+
+    private func rankTags() async {
+        #if os(iOS)
+        guard tags.all.count > Self.manyTags else { relevant = []; return }
+        let apple = model.apple
+        let asking = drafts.last.map { $0.reading?.text ?? $0.raw ?? "" } ?? ""
+        let code = file?.text.map { String($0.prefix(600)) } ?? ""
+        relevant = await apple.relevantTags(all: tags.all, module: path, code: code, asking: asking) ?? []
+        #endif
+    }
+
+    /// The notes written here since the last review, offered for tagging (switching tag or file, or closing the page).
+    private func reviewTags() {
+        #if os(iOS)
+        // The scratchpad isn't filed.
+        guard nativePage, model.tagReview == nil, !tags.onScratchpad else { return }
+        let notes = nativeInk.unreviewed()
+        guard !notes.isEmpty else { return }
+        TagSuggestions.shared.prepare(notes)
+        model.tagReview = TagReview(key: "file-\(path)", path: path, drafts: notes)
+        #endif
     }
 
     /// The first line of each run of changed lines.
@@ -534,17 +688,39 @@ struct FileViewer: View {
     }
 
     /// What this file opens (its notes): in its window's own stack, else where the layout opens things.
+    /// Show and pick a line, on whichever page shows the file.
+    private func reveal(_ line: Int) {
+        #if os(iOS)
+        if pencil, nativeCode { nativeInk.reveal(line: line); return }
+        #endif
+        page.reveal(line: line)
+    }
+
     private func push(_ route: FilesRoute) {
         if let filesStack { filesStack.path.append(route) } else { model.open(route, compact: density == .compact) }
     }
 
+    /// Just these notes, now: a question written with the Pencil, read and tagged, asks itself without sweeping up
+    /// the other notes waiting on the page.
+    private func send(only ids: Set<String>) async {
+        #if os(iOS)
+        let pending = drafts.filter { ids.contains($0.id) && !$0.sent }
+        guard !pending.isEmpty else { return }
+        let image = await nativeInk.snapshot(only: ids)?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
+        model.send(.notes(surface: .file(path: path), items: await nativeInk.items(pending), image: image, imageType: image == nil ? nil : "image/jpeg"))
+        for i in drafts.indices where ids.contains(drafts[i].id) { drafts[i].sent = true }
+        #endif
+    }
+
     private func send() async {
         #if os(iOS)
-        await ink.finishNote()
+        if nativeCode { await nativeInk.finishNote() } else { await ink.finishNote() }
         let pending = drafts.filter { !$0.sent }
-        guard !pending.isEmpty else { ink.toggleTools(); return }
-        let image = await ink.snapshot()?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
-        model.send(.notes(surface: .file(path: path), items: await ink.items(pending), image: image, imageType: image == nil ? nil : "image/jpeg"))
+        guard !pending.isEmpty else { nativeCode ? nativeInk.toggleTools() : ink.toggleTools(); return }
+        let picture = nativeCode ? await nativeInk.snapshot() : await ink.snapshot()
+        let image = picture?.jpegData(compressionQuality: 0.7)?.base64EncodedString()
+        let items = nativeCode ? await nativeInk.items(pending) : await ink.items(pending)
+        model.send(.notes(surface: .file(path: path), items: items, image: image, imageType: image == nil ? nil : "image/jpeg"))
         for i in drafts.indices where !drafts[i].sent { drafts[i].sent = true }
         sent += 1
         #endif
