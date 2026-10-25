@@ -154,6 +154,9 @@ struct AnnotationDetail: View {
             }
             .safeAreaInset(edge: .bottom, spacing: 0) { threadBar(a) }
             .navigationTitle(model.title(of: .note(current)))
+            // Opened, its answer has been seen: it leaves Needs you.
+            .onAppear { model.sawAnswers([current]) }
+            .onChange(of: a.answered) { _, answered in if answered { model.sawAnswers([current]) } }
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
             #endif

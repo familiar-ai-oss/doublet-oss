@@ -3,15 +3,21 @@ import DuetKit
 import UIKit
 
 /// What a code page shows beside its code: the lines changed since the last commit and where lines were removed, the
-/// kept notes on its lines (a bubble in the gutter, a card for each one not yet resolved), and the diagrams that
-/// explain it (a stripe, a ◆ on each element's line, a card).
+/// kept notes on its lines (one pill per line, only while there's something for you), and the diagrams that explain
+/// it (a stripe, a ◆ on each element's line, a pill).
 struct CodePageDecor: Equatable {
     var changed: Set<Int> = []
     var removedAfter: Set<Int> = []
     var marks: [Int: LineMark] = [:]
     var peeks: [DiagramPeek] = []
 
-    var hasCards: Bool { !peeks.isEmpty || marks.values.contains { !$0.cards.isEmpty } }
+    var hasCards: Bool { !peeks.isEmpty || marks.values.contains(where: \.wantsYou) }
+}
+
+extension LineMark {
+    /// Something on the line for you: a question being answered, or an answer not yet resolved. Otherwise the line
+    /// is plain code again (its history still opens from its number).
+    var wantsYou: Bool { answering || state != "resolved" }
 }
 
 /// Something on the page a finger can tap, in page coordinates.
@@ -22,6 +28,8 @@ enum CodePageHit: Equatable {
     case history(Int)
     /// A question asked a moment ago: take it back.
     case cancel(String)
+    /// The line's answers dealt with: resolve these notes.
+    case resolve([String])
 }
 
 /// The decorations, drawn into the code view (so they zoom and scroll with it): tints and stripes under the text, bubbles,
@@ -31,6 +39,8 @@ enum CodePageHit: Equatable {
 final class CodeDecorations {
     static let cardWidth: CGFloat = 280
     static let cardGap: CGFloat = 16
+    /// A pill's widest on a page with no room beside the code.
+    static let narrowPill: CGFloat = 150
 
     private let under = CALayer()
     /// What each note's mark was snapped to: drawn behind the ink, so the mark is confirmed without asking.
@@ -110,17 +120,17 @@ final class CodeDecorations {
             band(CGRect(x: g.codeX - 6, y: g.rect(line: n, width: width).minY, width: 2, height: g.lineHeight), purple.withAlphaComponent(0.75))
         }
 
-        // In the gutter, before the number: a note's bubble, else a diagram element's ◆.
+        // A line's number opens its notes' history, resolved ones too: nothing is drawn for it.
+        for n in d.marks.keys where n <= g.lineCount {
+            let r = g.rect(line: n, width: width)
+            hits.append((CGRect(x: 0, y: r.minY, width: g.codeX - 2, height: g.lineHeight), .history(n)))
+        }
+        // In the gutter, before the number: a diagram element's ◆.
         let elementAt = Dictionary(d.peeks.flatMap { p in p.elements.map { ($0.line, (p, $0)) } }, uniquingKeysWith: { a, _ in a })
-        for n in Set(d.marks.keys).union(elementAt.keys) where n <= g.lineCount {
+        for n in elementAt.keys where n <= g.lineCount && d.marks[n] == nil {
             let r = g.rect(line: n, width: width)
             let box = CGRect(x: 3, y: r.minY + 2, width: 18, height: 16)
-            if let m = d.marks[n] {
-                let badge = Badge(state: m.state, count: m.ids.count)
-                add(badge, box, z, in: code)
-                if m.answering { pulse(badge.layer) }
-                hits.append((box.insetBy(dx: -6, dy: -2), .history(n)))
-            } else if let (p, e) = elementAt[n] {
+            if let (p, e) = elementAt[n] {
                 let mark = UILabel()
                 mark.text = "◆"
                 mark.font = .systemFont(ofSize: 10 * z)
@@ -130,37 +140,49 @@ final class CodeDecorations {
             }
         }
 
-        // Beside the code, on a wide page: each line's notes and diagrams folded to one pill, level with the line, so
-        // they never take more than its row. A tap on a pill (or a bubble) opens the line's history under it.
+        // One pill per line, level with it, so it never takes more than its row: beside the code on a wide page, at
+        // the page's right edge on a narrow one. A note's pill shows only while there's something for you; a tap
+        // opens the line's answer under it.
         let x = Self.cardsX(g, pageWidth: width)
-        if showsCards {
-            for p in d.peeks where p.line <= g.lineCount {
-                let r = g.rect(line: p.line, width: width)
-                let pill = Pill(text: "◆ " + p.title, accent: purple)
-                let f = CGRect(x: x, y: r.minY + 2, width: min(Self.cardWidth, pill.width), height: g.lineHeight - 4)
-                add(pill, f, z, in: code)
-                hits.append((f, .diagram(p.id, element: nil)))
-            }
-            for (n, m) in d.marks where n <= g.lineCount && !m.history.isEmpty && !d.peeks.contains(where: { $0.line == n }) {
-                let r = g.rect(line: n, width: width)
-                let pill = Pill(history: m.history, state: m.state)
-                let f = CGRect(x: x, y: r.minY + 2, width: min(Self.cardWidth, pill.width), height: g.lineHeight - 4)
-                add(pill, f, z, in: code)
-                if m.answering { pulse(pill.layer) }
-                hits.append((f, .history(n)))
-            }
+        func place(_ pill: Pill, line n: Int) -> CGRect {
+            let r = g.rect(line: n, width: width)
+            if showsCards { return CGRect(x: x, y: r.minY + 2, width: min(Self.cardWidth, pill.width), height: g.lineHeight - 4) }
+            let w = min(Self.narrowPill, pill.width)
+            return CGRect(x: width - g.right - w, y: r.minY + 2, width: w, height: g.lineHeight - 4)
         }
-        // The open line's history: every question asked on it, newest first, under the line, over what's below it.
+        for p in d.peeks where p.line <= g.lineCount && showsCards {
+            let pill = Pill(text: "◆ " + p.title, accent: purple)
+            let f = place(pill, line: p.line)
+            add(pill, f, z, in: code)
+            hits.append((f, .diagram(p.id, element: nil)))
+        }
+        for (n, m) in d.marks where n <= g.lineCount && m.wantsYou && !m.history.isEmpty && !(showsCards && d.peeks.contains { $0.line == n }) {
+            let pill = Pill(history: m.history, state: m.state, answering: m.answering)
+            let f = place(pill, line: n)
+            add(pill, f, z, in: code)
+            if m.answering { pulse(pill.layer) }
+            hits.append((f, .history(n)))
+        }
+        // The open line's answers: every question asked on it, newest first, short, under the line, over what's below
+        // it. A row opens its thread; the footer opens the newest one's, and resolves the line (or takes back a
+        // question just asked).
         if let n = open, n <= g.lineCount, let m = d.marks[n], !m.history.isEmpty {
             let line = g.rect(line: n, width: width)
             let w = showsCards ? Self.cardWidth : min(420, width - g.codeX - g.right)
             let takeBack = m.history.last { cancellable.contains($0.id) }?.id
-            let card = HistoryCard(m.history.reversed(), takeBack: takeBack != nil, dark: dark)
+            let unresolved = m.history.filter { !$0.resolved }.map(\.id)
+            let second: HistoryCard.Second? = takeBack != nil ? .takeBack : unresolved.isEmpty ? nil : .resolve
+            let card = HistoryCard(m.history.reversed(), second: second, dark: dark)
             let f = CGRect(x: showsCards ? x : g.codeX, y: line.maxY + 2, width: w, height: card.height(width: w))
             add(card, f, z, in: code)
             for (id, r) in card.rows(width: w) { hits.append((r.offsetBy(dx: f.minX, dy: f.minY), .notes([id]))) }
-            hits.append((CGRect(x: f.minX, y: f.maxY - HistoryCard.footer, width: w / 2, height: HistoryCard.footer), .notes(m.ids)))
-            if let takeBack { hits.append((CGRect(x: f.minX + w / 2, y: f.maxY - HistoryCard.footer, width: w / 2, height: HistoryCard.footer), .cancel(takeBack))) }
+            let foot = CGRect(x: f.minX, y: f.maxY - HistoryCard.footer, width: w / 2, height: HistoryCard.footer)
+            hits.append((foot, .notes([m.history.last!.id])))
+            switch second {
+            case .takeBack: hits.append((foot.offsetBy(dx: w / 2, dy: 0), .cancel(takeBack!)))
+            case .resolve: hits.append((foot.offsetBy(dx: w / 2, dy: 0), .resolve(unresolved)))
+            case nil: break
+            }
         }
     }
 
@@ -216,43 +238,6 @@ final class CodeDecorations {
 @MainActor
 private protocol ZoomDrawn: AnyObject { var zoom: CGFloat { get set } }
 
-/// A kept note's bubble in the gutter: an outline while it waits, filled once answered, grey once resolved.
-private final class Badge: UIView, ZoomDrawn {
-    let state: String
-    let count: Int
-    var zoom: CGFloat = 1 { didSet { setNeedsDisplay() } }
-
-    init(state: String, count: Int) {
-        self.state = state
-        self.count = count
-        super.init(frame: .zero)
-        isOpaque = false
-        backgroundColor = .clear
-        contentMode = .redraw
-    }
-
-    required init?(coder: NSCoder) { fatalError() }
-
-    override func draw(_ rect: CGRect) {
-        let r = bounds.insetBy(dx: 1, dy: 1)
-        let path = UIBezierPath(roundedRect: r, byRoundingCorners: [.topLeft, .topRight, .bottomRight], cornerRadii: CGSize(width: r.height / 2, height: r.height / 2))
-        let blue = UIColor.systemBlue, color = state == "resolved" ? UIColor.systemGray : blue
-        if state == "open" {
-            color.setStroke()
-            path.lineWidth = 1.5 * zoom
-            path.stroke()
-        } else {
-            color.setFill()
-            path.fill()
-        }
-        guard count > 1 else { return }
-        let text = NSAttributedString(string: "\(count)", attributes: [.font: UIFont.systemFont(ofSize: 10 * zoom, weight: .semibold),
-                                                                         .foregroundColor: state == "open" ? blue : .white])
-        let s = text.size()
-        text.draw(at: CGPoint(x: r.midX - s.width / 2, y: r.midY - s.height / 2))
-    }
-}
-
 /// A line's notes or a diagram, folded to one row beside the line: what was last asked there, and how many.
 private final class Pill: UIView, ZoomDrawn {
     private let text: NSAttributedString
@@ -268,11 +253,11 @@ private final class Pill: UIView, ZoomDrawn {
         contentMode = .redraw
     }
 
-    convenience init(history: [NoteCard], state: String) {
+    convenience init(history: [NoteCard], state: String, answering: Bool) {
         let last = history.last!
-        let mark = state == "open" ? "✎" : "✓"
+        let mark = answering ? "…" : state == "open" ? "✎" : "✓"
         let more = history.count > 1 ? "  ·  \(history.count)" : ""
-        self.init(text: "\(mark) \(last.gist ?? NoteGist.fallback(last.question))\(more)", accent: state == "resolved" ? .secondaryLabel : .systemBlue)
+        self.init(text: "\(mark) \(last.gist ?? NoteGist.fallback(last.question))\(more)", accent: .systemBlue)
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -291,21 +276,23 @@ private final class Pill: UIView, ZoomDrawn {
     }
 }
 
-/// A line's history, opened from its pill or bubble: each question asked on the line and the start of its answer (or
-/// that it's being answered, or resolved), newest first. Opaque, with no shadow: it may sit where the Pencil writes.
+/// A line's answers, opened from its pill or its number (or by itself when an answer comes): each question asked on
+/// the line and the start of its answer (or that it's being answered, or resolved), newest first. Opaque, with no
+/// shadow: it may sit where the Pencil writes.
 private final class HistoryCard: UIView, ZoomDrawn {
+    /// The footer's second button.
+    enum Second { case resolve, takeBack }
     static let footer: CGFloat = 28
     private static let pad: CGFloat = 10
     private let items: [NoteCard]
     private let dark: Bool
-    /// Its newest question was asked a moment ago: it can be taken back.
-    private let takeBack: Bool
+    private let second: Second?
     var zoom: CGFloat = 1 { didSet { setNeedsDisplay() } }
 
-    init(_ items: some Sequence<NoteCard>, takeBack: Bool, dark: Bool) {
+    init(_ items: some Sequence<NoteCard>, second: Second?, dark: Bool) {
         self.items = Array(items.prefix(6))
         self.dark = dark
-        self.takeBack = takeBack
+        self.second = second
         super.init(frame: .zero)
         isOpaque = false
         backgroundColor = .clear
@@ -359,12 +346,15 @@ private final class HistoryCard: UIView, ZoomDrawn {
             UIColor.separator.setFill()
             ctx.fill(CGRect(x: Self.pad, y: r.maxY, width: w, height: 0.5))
         }
-        let foot = NSAttributedString(string: "All notes on this line ›", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemBlue])
+        let bold = UIFont.systemFont(ofSize: 12, weight: .semibold)
+        let foot = NSAttributedString(string: "Open thread ›", attributes: [.font: bold, .foregroundColor: UIColor.systemBlue])
         foot.draw(at: CGPoint(x: Self.pad, y: bounds.height / zoom - Self.footer + 6))
-        if takeBack {
-            let back = NSAttributedString(string: "Take back question", attributes: [.font: UIFont.systemFont(ofSize: 12, weight: .semibold), .foregroundColor: UIColor.systemRed])
-            back.draw(at: CGPoint(x: width / 2 + Self.pad, y: bounds.height / zoom - Self.footer + 6))
+        let label: NSAttributedString? = switch second {
+        case .takeBack: NSAttributedString(string: "Take back question", attributes: [.font: bold, .foregroundColor: UIColor.systemRed])
+        case .resolve: NSAttributedString(string: "Resolve ✓", attributes: [.font: bold, .foregroundColor: UIColor.systemGreen])
+        case nil: nil
         }
+        label?.draw(at: CGPoint(x: width / 2 + Self.pad, y: bounds.height / zoom - Self.footer + 6))
     }
 }
 

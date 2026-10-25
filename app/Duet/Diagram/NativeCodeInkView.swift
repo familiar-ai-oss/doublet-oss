@@ -4,25 +4,20 @@ import PencilKit
 import SwiftUI
 import UIKit
 
-/// SwiftUI's handle on a native code page: the palette, the file's note pages, and its notes for sending.
+/// SwiftUI's handle on a native code page: the palette, the file's tags, and its notes for sending.
 @MainActor @Observable
 final class NativeInkController {
-    struct PageName: Identifiable, Equatable { let id: UUID; let name: String }
-
     @ObservationIgnored weak var view: NativeCodeInkView? {
-        didSet { view?.controller = self; view?.publishPages() }
+        didSet { view?.controller = self; view?.publishTags() }
     }
-    /// The file's note pages, for the toolbar's menu, and the one shown.
-    private(set) var pages: [PageName] = []
-    private(set) var current: UUID?
-
-    var currentName: String { pages.first { $0.id == current }?.name ?? "Note 1" }
+    /// The tags used on this file, most used first, for the toolbar's menu.
+    private(set) var fileTags: [String] = []
+    /// The notes the page shows through its tag (nil: every note): only their marks show beside the code.
+    private(set) var shownNotes: Set<String>?
 
     func toggleTools() { view?.toggleTools() }
-    func show(page id: UUID) { view?.show(page: id) }
-    func addPage() { view?.addPage() }
-    func rename(_ id: UUID, to name: String) { view?.rename(id, to: name) }
-    func remove(_ id: UUID) { view?.remove(id) }
+    /// The file's notes not yet offered for tagging, for the review as the page is left.
+    func unreviewed() -> [DraftNote] { view?.keptNotes.filter { $0.tagsReviewed != true && !$0.strokeIDs.isEmpty } ?? [] }
     /// Wrap the file again for the width it's shown at now.
     func reflow() { view?.reflow() }
 
@@ -45,10 +40,9 @@ final class NativeInkController {
         }
     }
 
-    func update(_ book: CodeNoteBook) {
-        let names = book.pages.map { PageName(id: $0.id, name: $0.name) }
-        if names != pages { pages = names }
-        if current != book.current { current = book.current }
+    func update(tags: [String], shown: Set<String>?) {
+        if tags != fileTags { fileTags = tags }
+        if shown != shownNotes { shownNotes = shown }
     }
 }
 
@@ -58,6 +52,8 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
     let text: String
     let controller: NativeInkController
     @Binding var drafts: [DraftNote]
+    /// The tag the page is seen through (nil: every note).
+    var tag: String?
     var decor = CodePageDecor()
     /// A line picked with a finger (nil: none).
     var onSelect: (InkAnchor?) -> Void = { _ in }
@@ -69,6 +65,12 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
     var onQuestion: (String) -> Void = { _ in }
     /// A question taken back: delete it.
     var onCancel: (String) -> Void = { _ in }
+    /// A sent note rubbed out (and not brought back by Undo): delete it everywhere.
+    var onErased: (String) -> Void = { _ in }
+    /// A line's answers resolved from its card.
+    var onResolve: ([String]) -> Void = { _ in }
+    /// These notes' answers were seen (their line's card opened).
+    var onSeen: ([String]) -> Void = { _ in }
 
     /// Whether SwiftUI has heard of the notes the view restored. Until then its (empty) list mustn't replace them.
     final class Coordinator { var synced = false }
@@ -79,6 +81,7 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
         let v = NativeCodeInkView(key: "file-\(path)")
         v.onDrafts = { drafts = $0 }
         callbacks(v)
+        v.noteTag = tag
         v.show(path: path, text: text, decor: decor)
         controller.view = v
         let restored = v.notes.drafts, coordinator = context.coordinator
@@ -93,6 +96,7 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
         v.onDrafts = { drafts = $0 }
         callbacks(v)
         v.show(path: path, text: text, decor: decor)
+        v.see(tag)
         if context.coordinator.synced, drafts != v.notes.drafts { v.setDrafts(drafts) }
     }
 
@@ -102,6 +106,9 @@ struct NativeCodeInkRepresentable: UIViewRepresentable {
         v.onDiagram = onDiagram
         v.onQuestion = onQuestion
         v.onCancel = onCancel
+        v.notes.onErased = onErased
+        v.onResolve = onResolve
+        v.onSeen = onSeen
     }
 }
 
@@ -156,8 +163,12 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
     private var geometry = CodePageGeometry(lineCount: 1, columns: 1, advance: 8)
     /// The file's text as laid out (tabs as spaces).
     private var layoutText = ""
-    /// The book's current page is on the canvas (it waits for the page's width to be known).
+    /// The book's notes through the tag are on the canvas (it waits for the page's width to be known).
     private var pageLoaded = false
+    /// The tag the page is seen through (nil: every note).
+    fileprivate(set) var noteTag: String?
+    /// What the canvas was given from the book: the rest of the book is kept as it is.
+    private var given: (strokes: Set<UUID>, drafts: Set<String>) = ([], [])
     private var anchors: [InkAnchor] = []
     private var book: CodeNoteBook?
     private var penDown = false
@@ -171,7 +182,9 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
     var onDiagram: ((String, String?) -> Void)?
     var onQuestion: ((String) -> Void)?
     var onCancel: ((String) -> Void)?
-    /// SwiftUI's handle, for the toolbar's page menu.
+    var onResolve: (([String]) -> Void)?
+    var onSeen: (([String]) -> Void)?
+    /// SwiftUI's handle, for the toolbar's tag menu.
     weak var controller: NativeInkController?
 
     /// The code's size: the page's base size, scaled by the user's text size (Settings › Display & Brightness).
@@ -245,6 +258,16 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
             guard let self else { return }
             self.feedback.pathCompleted(at: self.convert(p, from: self.code))
         }
+        // A tag renamed, merged or deleted from any page: this file's notes change with it.
+        NotificationCenter.default.addObserver(forName: NoteTags.changed, object: nil, queue: .main) { [weak self] n in
+            let old = n.userInfo?["old"] as? String, new = n.userInfo?["new"] as? String
+            MainActor.assumeIsolated { if let old { self?.retag(old, to: new) } }
+        }
+        // A note's tags set in the review.
+        NotificationCenter.default.addObserver(forName: NoteTags.noteTagged, object: nil, queue: .main) { [weak self] n in
+            guard let key = n.userInfo?["key"] as? String, let id = n.userInfo?["id"] as? String, let tags = n.userInfo?["tags"] as? [String] else { return }
+            MainActor.assumeIsolated { if key == self?.key { self?.setTags(tags, on: id) } }
+        }
     }
 
     required init?(coder: NSCoder) { fatalError() }
@@ -255,6 +278,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         guard !penDown, !notes.busy else { waiting = (path, text, decor); return }
         waiting = nil
         let first = shown?.path != path
+        // An answer just came for a note here: it opens under its line (unless another line's is open).
+        if !first, openLine == nil, let n = Self.newlyAnswered(from: self.decor, to: decor) { openLine = n; onSeen?(decor.marks[n]?.ids ?? []) }
         shown = (path, text)
         notes.code?.path = path
         self.decor = decor
@@ -286,9 +311,8 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         geometry = CodePageGeometry(text: layoutText, advance: adv, fontSize: size, paper: book.paper)
         if !pageLoaded {
             pageLoaded = true
-            loadPage(book.page)
+            loadTag()
             onDrafts?(notes.drafts)
-            publishPages()
         } else if notes.follow(layoutText, geometry: geometry) {
             // The file changed under its notes, or the paper did: each note's ink moves with its line.
             onDrafts?(notes.drafts)
@@ -350,16 +374,27 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         show(path: w.path, text: w.text, decor: w.decor)
     }
 
-    /// A page's ink and notes onto the canvas, each note where its line is in the file now.
-    private func loadPage(_ page: CodeNotePage) {
-        notes.load((try? PKDrawing(data: page.drawing)) ?? PKDrawing(), drafts: page.drafts)
+    /// The book's ink and notes through the tag onto the canvas, each note where its line is in the file now.
+    private func loadTag() {
+        guard let book else { return }
+        let v = book.visible(noteTag)
+        notes.load(v.drawing, drafts: v.drafts)
+        given = (Set(v.drawing.strokes.map(\.id)), Set(v.drafts.map(\.id)))
         if notes.follow(layoutText, geometry: geometry) { onDrafts?(notes.drafts); save() }
+        publishTags()
     }
 
     override func didMoveToWindow() {
         super.didMoveToWindow()
         guard let window else {
-            // Leaving the screen: the palette goes with it (it's shared with the window's other pages).
+            // Leaving the screen: kept now, not in a moment (the tag review may change the kept book next).
+            saveTask?.cancel()
+            if var book, pageLoaded {
+                keepCurrent(in: &book)
+                self.book = book
+                book.save(key: key)
+            }
+            // The palette goes with it (it's shared with the window's other pages).
             picker?.setVisible(false, forFirstResponder: canvas)
             picker?.removeObserver(canvas)
             picker?.removeObserver(self)
@@ -396,69 +431,75 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         picker.setVisible(!picker.isVisible, forFirstResponder: canvas)
     }
 
-    // MARK: - Note pages
+    // MARK: - Tags
 
-    func publishPages() {
-        if let book { controller?.update(book) }
+    func publishTags() {
+        guard let book else { return }
+        controller?.update(tags: book.tags, shown: noteTag == nil ? nil : Set(notes.drafts.map(\.id)))
     }
 
-    func show(page id: UUID) {
-        guard var book, book.current != id, book.pages.contains(where: { $0.id == id }) else { return }
+    /// See the file through another tag (nil: every note). The note being written stays under the tag it was
+    /// written with.
+    func see(_ new: String?) {
+        guard new != noteTag else { return }
+        guard book != nil, pageLoaded else { noteTag = new; return }
         Task {
-            // The note being written goes with the page it was written on.
             await notes.finishGroup()
+            guard var book = self.book else { return }
             keepCurrent(in: &book)
-            book.current = id
             self.book = book
-            loadPage(book.page)
+            noteTag = new
+            loadTag()
             canvas.undoManager?.removeAllActions()
             onDrafts?(notes.drafts)
-            publishPages()
+            relay(width: pageSize.width, zoom: drawnZoom)
             save()
         }
     }
 
-    func addPage() {
+    /// A tag renamed (`new`) or deleted (nil) everywhere: this file's notes, on the page and kept, change with it.
+    private func retag(_ old: String, to new: String?) {
         guard var book else { return }
-        Task {
-            await notes.finishGroup()
-            keepCurrent(in: &book)
-            book.add()
-            self.book = book
-            notes.load(PKDrawing(), drafts: [])
-            canvas.undoManager?.removeAllActions()
-            onDrafts?([])
-            publishPages()
-            save()
-        }
-    }
-
-    func rename(_ id: UUID, to name: String) {
-        book?.rename(id, to: name)
-        publishPages()
-        save()
-    }
-
-    func remove(_ id: UUID) {
-        guard var book else { return }
-        let wasCurrent = book.current == id
-        book.remove(id)
+        keepCurrent(in: &book)
+        let changed = new.map { book.renameTag(old, to: $0) } ?? book.removeTag(old)
         self.book = book
-        if wasCurrent {
-            loadPage(book.page)
-            canvas.undoManager?.removeAllActions()
-            onDrafts?(notes.drafts)
-        }
-        publishPages()
+        if noteTag == old { noteTag = new }
+        guard changed || noteTag == new else { return }
+        loadTag()
+        onDrafts?(notes.drafts)
         save()
     }
 
-    /// What's on the canvas, into the book's current page.
+    /// What's on the canvas, back into the book: new notes take the page's tag.
     private func keepCurrent(in book: inout CodeNoteBook) {
-        var page = book.page
-        page.drawing = canvas.drawing.dataRepresentation()
-        page.drafts = notes.drafts
-        book.page = page
+        book.merge(canvas.drawing, drafts: notes.drafts, shown: given, tag: noteTag)
+        given = (Set(canvas.drawing.strokes.map(\.id)), Set(notes.drafts.map(\.id)))
+        let tags = Dictionary(book.drafts.map { ($0.id, $0.tags ?? []) }, uniquingKeysWith: { a, _ in a })
+        notes.retag(tags)
+    }
+
+    /// A note's tags changed (from the review, or by hand), on the page and kept.
+    func setTags(_ tags: [String], on id: String) {
+        guard var book else { return }
+        keepCurrent(in: &book)
+        if let i = book.drafts.firstIndex(where: { $0.id == id }) {
+            book.drafts[i].tags = Array(tags.prefix(NoteTags.limit))
+            book.drafts[i].tagsReviewed = true
+        }
+        self.book = book
+        // Taken off the tag the page is seen through: it leaves the page.
+        if let noteTag, !tags.contains(noteTag) { loadTag() } else { notes.retag([id: tags]) }
+        onDrafts?(notes.drafts)
+        publishTags()
+        save()
+    }
+
+    /// The file's notes as kept (every tag), for the tag review.
+    var keptNotes: [DraftNote] {
+        guard var book else { return [] }
+        keepCurrent(in: &book)
+        self.book = book
+        return book.drafts
     }
 
     // MARK: - Notes
@@ -470,6 +511,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
 
     private func notesChanged() {
         onDrafts?(notes.drafts)
+        publishTags()
         // A note just read or tagged: its snap shows (after the Pencil lifted; notes change only then).
         if shown != nil { relay(width: pageSize.width, zoom: drawnZoom) }
         save()
@@ -624,6 +666,7 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         case .history(let n): openHistory(n == openLine ? nil : n)
         case .notes(let ids): openHistory(nil); onMark?(ids)
         case .cancel(let id): openHistory(nil); notes.cancel(id)
+        case .resolve(let ids): openHistory(nil); onResolve?(ids)
         case .diagram(let id, let element): onDiagram?(id, element)
         case nil:
             // A tap away from an open history closes it, and nothing more.
@@ -644,10 +687,17 @@ final class NativeCodeInkView: UIView, PKCanvasViewDelegate, PKToolPickerObserve
         }
     }
 
-    /// Open a line's history under it (nil: close it).
+    /// The line of the newest note answered between two versions of the page's marks.
+    static func newlyAnswered(from old: CodePageDecor, to new: CodePageDecor) -> Int? {
+        let before = Set(old.marks.values.flatMap { $0.history.filter { $0.answer != nil }.map(\.id) })
+        return new.marks.filter { _, m in m.history.contains { $0.answer != nil && !$0.resolved && !before.contains($0.id) } }.keys.max()
+    }
+
+    /// Open a line's answers under it (nil: close them).
     private func openHistory(_ line: Int?) {
         guard line != openLine else { return }
         openLine = line
+        if let line { onSeen?(decor.marks[line]?.ids ?? []) }
         // Only the decorations change: the code stays as drawn.
         relay(width: pageSize.width, zoom: drawnZoom)
         decorations.select(selectedLine.map { geometry.rect(line: $0, width: pageSize.width) }, zoom: drawnZoom)

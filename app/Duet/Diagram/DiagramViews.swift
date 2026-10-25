@@ -20,6 +20,10 @@ struct DraftNote: Identifiable, Equatable, Codable {
     var chosen: Bool?
     /// On a native code page: what its mark picked out, and how surely.
     var span: CodeSpan?
+    /// On a native code page: its tags (up to `NoteTags.limit`), names shared across the codebase.
+    var tags: [String]?
+    /// Its tags were confirmed in a review (or by hand): no more suggestions for it.
+    var tagsReviewed: Bool?
     var id: String { note.id }
 }
 

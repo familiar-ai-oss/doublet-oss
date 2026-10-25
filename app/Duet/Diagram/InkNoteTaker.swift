@@ -39,6 +39,11 @@ final class InkNoteTaker {
     private var groupTimer: Timer?
     private var readings: [String: Task<Void, Never>] = [:]
     private var finishing = 0
+    /// A sent note whose ink was all rubbed out: deleted for good (on the hub too, with its answer and thread) unless
+    /// Undo brings its strokes back within `undoWindow`.
+    var onErased: ((String) -> Void)?
+    private var erased: [String: (draft: DraftNote, timer: Task<Void, Never>)] = [:]
+    static let undoWindow: Duration = .seconds(5)
 
     init(canvas: PKCanvasView) { self.canvas = canvas }
 
@@ -66,6 +71,16 @@ final class InkNoteTaker {
         // stroke, the lasso moving some away: a moved stroke has a new id) is read again from what's left.
         let gone = known.subtracting(now)
         if !gone.isEmpty {
+            // Every stroke of a sent note gone: it's erased, everywhere, once Undo has had its chance.
+            for d in drafts where d.sent && !d.strokeIDs.isEmpty && d.strokeIDs.isSubset(of: gone) {
+                let fire = onErased, id = d.id
+                erased[id] = (d, Task { [weak self] in
+                    try? await Task.sleep(for: Self.undoWindow)
+                    guard !Task.isCancelled else { return }
+                    self?.erased[id] = nil
+                    fire?(id)
+                })
+            }
             known.subtract(gone)
             group.removeAll { gone.contains($0) }
             var shrunk: [(id: String, strokes: [UUID])] = []
@@ -77,7 +92,16 @@ final class InkNoteTaker {
             onChange?()
             for s in shrunk { Task { await self.finish(s.strokes, into: s.id) } }
         }
-        let added = ids.filter { !known.contains($0) }
+        var added = ids.filter { !known.contains($0) }
+        // Undo brought an erased note's strokes back: the note comes back as it was, not as new ink.
+        for (id, e) in erased where !e.draft.strokeIDs.isEmpty && e.draft.strokeIDs.isSubset(of: now) {
+            e.timer.cancel()
+            erased[id] = nil
+            drafts.append(e.draft)
+            known.formUnion(e.draft.strokeIDs)
+            added.removeAll { e.draft.strokeIDs.contains($0) }
+            onChange?()
+        }
         guard !added.isEmpty else { return }
         known.formUnion(added)
         if let new = bounds(of: added) {
@@ -156,6 +180,11 @@ final class InkNoteTaker {
         known.formUnion(renamed.values)
         canvas.drawing = drawing
         return true
+    }
+
+    /// The notes' tags as kept (a review, a tag renamed or deleted), with no news of a change.
+    func retag(_ tags: [String: [String]]) {
+        for i in drafts.indices { if let t = tags[drafts[i].id], t != (drafts[i].tags ?? []) { drafts[i].tags = t } }
     }
 
     /// Notes edited or removed from SwiftUI (the tray). A deleted note's ink goes with it, unless another note uses it.

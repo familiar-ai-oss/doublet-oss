@@ -312,8 +312,10 @@ struct FileViewer: View {
     @State private var nativeInk = NativeInkController()
     /// Code drawn natively under a canvas that is the page, as in Notes (being built; the web page otherwise).
     @AppStorage("nativeCodePage") private var nativeCode = false
-    /// The note page being renamed, and its new name.
-    @State private var renaming: UUID?
+    /// The tags the code pages are seen through, shared across files.
+    @State private var tags = NoteTags.shared
+    /// A tag being renamed (or made), and its new name.
+    @State private var renaming: String?
     @State private var newName = ""
     #endif
 
@@ -374,6 +376,9 @@ struct FileViewer: View {
         .paneActions { actions }
         .onAppear {
             NoteGists.shared.apple = model.apple
+            #if os(iOS)
+            TagSuggestions.shared.apple = model.apple
+            #endif
             page.onTap = { selected = $0 }
             // A note's bubble in the margin: that note (or the notes on that line).
             page.onMark = { ids in push(ids.count == 1 ? .note(ids[0]) : .notes(.file(path))) }
@@ -381,7 +386,11 @@ struct FileViewer: View {
             page.onDiagram = { id, element in model.openDiagram(id, compact: density == .compact, focus: element) }
             if pencil { model.pencilSurfaces += 1 }
         }
-        .onDisappear { if pencil { model.pencilSurfaces -= 1 } }
+        .onDisappear {
+            if pencil { model.pencilSurfaces -= 1 }
+            // The page is left (another file, or closed): its new notes are offered for tagging.
+            reviewTags()
+        }
         .task(id: "\(path)|\(model.store.isConnected)") {
             guard model.store.isConnected || model.isDemo else { return }
             await load()
@@ -408,6 +417,10 @@ struct FileViewer: View {
         .onChange(of: selected?.id) { model.picked(selected, in: .file(path)) }
         .onChange(of: drafts.isEmpty) { _, empty in if !empty { model.keepOpen(.file(path)) } }
         #if os(iOS)
+        // Tags for each note are worked out as it closes, so the review is ready when the page is left.
+        .onChange(of: drafts) { _, now in if nativePage { TagSuggestions.shared.prepare(now) } }
+        #endif
+        #if os(iOS)
         // Sent here to write on (Write on iPad): the Pencil tools come out.
         .writesWhenSent(.file(path)) { if pencil { ink.showTools() } }
         #endif
@@ -426,7 +439,15 @@ struct FileViewer: View {
         let rank = ["open": 2, "answered": 1, "resolved": 0]
         var at: [Int: (ids: [String], state: String, cards: [NoteCard], history: [NoteCard], answering: Bool)] = [:]
         var unplaced = 0
-        for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) {
+        // Seen through a tag: only its notes have marks.
+        let shown: Set<String>? = {
+            #if os(iOS)
+            return nativePage ? nativeInk.shownNotes : nil
+            #else
+            return nil
+            #endif
+        }()
+        for a in model.store.annotations(onFile: path).sorted(by: { $0.ts < $1.ts }) where shown?.contains(a.id) ?? true {
             guard let l = a.lines?.first, let r = Reanchor.place(l, in: lines) else { unplaced += 1; continue }
             var e = at[r.lowerBound] ?? ([], "resolved", [], [], false)
             // Being answered now (or asked a moment ago and not yet picked up): its pill pulses.
@@ -481,7 +502,7 @@ struct FileViewer: View {
                                        marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? ""))
         #if os(iOS)
         if pencil, nativeCode {
-            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts,
+            NativeCodeInkRepresentable(path: f.path, text: f.text ?? "", controller: nativeInk, drafts: $drafts, tag: tags.current,
                                        decor: CodePageDecor(changed: Set(f.changed ?? []), removedAfter: Set(f.removedAfter ?? []),
                                                             marks: marks(f.text ?? "").marks, peeks: peeks(f.text ?? "")),
                                        onSelect: { selected = $0 }, onMark: { ids in page.onMark?(ids) },
@@ -490,7 +511,12 @@ struct FileViewer: View {
                                        onCancel: { id in
                                            drafts.removeAll { $0.id == id }
                                            if model.store.annotations[id] != nil { model.send(.annotationUpdate(id: id, delete: true)) }
-                                       })
+                                       },
+                                       onErased: { id in
+                                           if model.store.annotations[id] != nil { model.send(.annotationUpdate(id: id, delete: true)) }
+                                       },
+                                       onResolve: { ids in for id in ids { model.send(.annotationUpdate(id: id, status: "resolved")) } },
+                                       onSeen: { model.sawAnswers($0) })
         } else if pencil {
             InkSurfaceRepresentable(page: page, document: doc, key: "file-\(f.path)", isDiff: true, controller: ink,
                                     drafts: $drafts, search: "", onSelect: { selected = $0 }, onSqueeze: { Task { await send() } })
@@ -543,7 +569,7 @@ struct FileViewer: View {
         }
         #if os(iOS)
         if pencil { Button("Pencil Tools", systemImage: "pencil.tip.crop.circle") { nativeCode ? nativeInk.toggleTools() : ink.toggleTools() } }
-        if pencil, nativeCode { notePages }
+        if pencil, nativeCode { tagMenu }
         #endif
         Button("Side Chat", systemImage: "bubble.left.and.bubble.right") { model.openSideChat(about: .file(path: path)) }
             .help("Ask a quick question about this file, beside the conversation (⌘⇧K)")
@@ -566,32 +592,56 @@ struct FileViewer: View {
     }
 
     #if os(iOS)
-    /// The file's note pages: layers of ink, one shown and written on at a time, each with its own notes.
-    @ViewBuilder private var notePages: some View {
+    /// The tag the page is seen through: the page's title. Picking one carries over to every file; anything written
+    /// then is filed under it.
+    @ViewBuilder private var tagMenu: some View {
+        let ranked = tags.ranked(onFile: nativeInk.fileTags)
         Menu {
-            Picker("Note Page", selection: Binding(get: { nativeInk.current }, set: { if let id = $0 { nativeInk.show(page: id) } })) {
-                ForEach(nativeInk.pages) { Text($0.name).tag(Optional($0.id)) }
-            }
-            Divider()
-            Button("New Note Page", systemImage: "plus") { nativeInk.addPage() }
-            // Long lines wrap on the file's paper, cut to the width it was first shown at; this cuts it again.
-            Button("Reflow to This Width", systemImage: "text.alignleft") { nativeInk.reflow() }
-            if let id = nativeInk.current {
-                Button("Rename…", systemImage: "pencil") { newName = nativeInk.currentName; renaming = id }
-                if nativeInk.pages.count > 1 {
-                    Button("Delete “\(nativeInk.currentName)”", systemImage: "trash", role: .destructive) { nativeInk.remove(id) }
+            // Another tag: the notes written under this one are offered for tagging first.
+            Picker("Tag", selection: Binding(get: { tags.current }, set: { reviewTags(); tags.pick($0) })) {
+                Text("All Notes").tag(String?.none)
+                if !ranked.here.isEmpty {
+                    Section("On This File") { ForEach(ranked.here, id: \.self) { Text($0).tag(Optional($0)) } }
+                }
+                if !ranked.other.isEmpty {
+                    Section("Other Tags") { ForEach(ranked.other.prefix(12), id: \.self) { Text($0).tag(Optional($0)) } }
                 }
             }
-        } label: { Label(nativeInk.currentName, systemImage: "square.stack") }
+            Divider()
+            Button("New Tag…", systemImage: "plus") { newName = ""; renaming = "" }
+            if let current = tags.current {
+                Button("Rename “\(current)”…", systemImage: "pencil") { newName = current; renaming = current }
+                Button("Delete “\(current)”", systemImage: "trash", role: .destructive) { tags.delete(current) }
+            }
+            Divider()
+            // Long lines wrap on the file's paper, cut to the width it was first shown at; this cuts it again.
+            Button("Reflow to This Width", systemImage: "text.alignleft") { nativeInk.reflow() }
+        } label: { Label(tags.current ?? "All Notes", systemImage: "tag") }
             .labelStyle(.titleAndIcon)
-            .help("Pages of notes on this file: each its own ink, one shown at a time")
-            .alert("Rename Note Page", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
+            .help("See this file's notes through one tag. New notes are filed under it.")
+            .alert(renaming == "" ? "New Tag" : "Rename Tag", isPresented: Binding(get: { renaming != nil }, set: { if !$0 { renaming = nil } })) {
                 TextField("Name", text: $newName)
-                Button("Rename") { if let id = renaming { nativeInk.rename(id, to: newName) }; renaming = nil }
+                Button(renaming == "" ? "Create" : "Rename") {
+                    if let old = renaming { old.isEmpty ? tags.pick(newName) : tags.rename(old, to: newName) }
+                    renaming = nil
+                }
                 Button("Cancel", role: .cancel) { renaming = nil }
+            } message: {
+                if renaming != "" { Text("Renamed on every file. A name that's already a tag merges the two.") }
             }
     }
     #endif
+
+    /// The notes written here since the last review, offered for tagging (switching tag or file, or closing the page).
+    private func reviewTags() {
+        #if os(iOS)
+        guard nativePage, model.tagReview == nil else { return }
+        let notes = nativeInk.unreviewed()
+        guard !notes.isEmpty else { return }
+        TagSuggestions.shared.prepare(notes)
+        model.tagReview = TagReview(key: "file-\(path)", path: path, drafts: notes)
+        #endif
+    }
 
     /// The first line of each run of changed lines.
     private func changeStarts(_ lines: [Int]) -> [Int] {

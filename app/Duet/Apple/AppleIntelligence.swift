@@ -387,6 +387,29 @@ final class AppleIntelligence {
         return NoteGist.clean(r.content.subject)
     }
 
+    /// Tags for a note, to suggest when its page is left.
+    @Generable
+    struct NoteTagging {
+        @Guide(description: "One to five short tags filing the note by what it's about (security, storage, call map...). Reuse an existing tag whenever one fits.", .maximumCount(5))
+        var tags: [String]
+    }
+
+    /// Up to five tags for a note on code, preferring the user's existing tags (nil when the model is unavailable or
+    /// busy). The note, its code, the answer's start and the existing tags go in the prompt, never the instructions.
+    func suggestTags(note: String, code: String, answer: String?, existing: [String]) async -> [String]? {
+        guard model.isAvailable, await free(within: .seconds(8)) else { return nil }
+        let session = LanguageModelSession(model: model, instructions: """
+        You file a developer's notes on code under tags, so they can later see all their notes on one subject \
+        (security, storage, a call map, architecture, learning, ideas...). Suggest one to five short lowercase tags \
+        for the note. Reuse the existing tags exactly as written whenever one fits; make a new tag only when none does.
+        """)
+        var input = "Note:\n\(note.prefix(400))\n\nCode:\n\(code.prefix(800))"
+        if let answer, !answer.isEmpty { input += "\n\nAnswer:\n\(answer.prefix(300))" }
+        input += "\n\nExisting tags: " + (existing.isEmpty ? "none yet" : existing.prefix(40).joined(separator: ", "))
+        guard let r = try? await session.respond(to: input, generating: NoteTagging.self, options: GenerationOptions(samplingMode: .greedy)) else { return nil }
+        return r.content.tags
+    }
+
     func route(_ text: String) async -> Route? {
         if let r = routes[text] { return r }
         guard model.isAvailable, await free(within: .seconds(2)) else { return nil }
