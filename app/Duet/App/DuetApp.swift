@@ -27,6 +27,7 @@ struct DuetApp: App {
         WindowGroup(id: "main") {
             RootView()
                 .environment(model)
+                .tint(.stateNeedsYou) // the app's accent is your hand (design system: Button)
                 .onAppear { model.connectIfNeeded() }
                 .onOpenURL { model.handle(url: $0) }
         }
@@ -42,7 +43,7 @@ struct DuetApp: App {
         // (`Destination.windowGroup`). A tab dragged out of the main window opens where it's let go (Mac), or, dropped
         // at the iPad's screen edge, in a new window of its group, which takes the dropped place as its value.
         WindowGroup("Terminal", id: "terminal", for: String.self) { $id in
-            PaneWindow(place: id.map { .terminal($0) }).environment(model)
+            PaneWindow(place: id.map { .terminal($0) }).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if id == nil, case .terminal(let t) = $0 { id = t } }
         }
         #if os(macOS)
@@ -54,7 +55,7 @@ struct DuetApp: App {
 
         // A side chat in a window of its own: on Mac at the screen's trailing edge, a panel beside the app.
         WindowGroup("Side Chat", id: "side", for: SideChatRef.self) { $ref in
-            SideChatWindow(ref: ref).environment(model)
+            SideChatWindow(ref: ref).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if ref == nil, case .sideChat(let c) = $0 { ref = SideChatRef(chatId: c) } }
         }
         #if os(macOS)
@@ -68,7 +69,7 @@ struct DuetApp: App {
         #endif
 
         WindowGroup("File", id: "file", for: String.self) { $path in
-            PaneWindow(place: path.map { .file($0) }).environment(model)
+            PaneWindow(place: path.map { .file($0) }).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if path == nil, case .file(let p, _) = $0 { path = p } }
         }
         #if os(macOS)
@@ -78,7 +79,7 @@ struct DuetApp: App {
         .handlesExternalEvents(matching: [PaneActivity.condition("file")])
         #endif
         WindowGroup("Conversation", id: "conversation", for: String.self) { $id in
-            PaneWindow(place: id.map { .conversation($0) }).environment(model)
+            PaneWindow(place: id.map { .conversation($0) }).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if id == nil, case .conversation(let c) = $0 { id = c } }
         }
         #if os(macOS)
@@ -88,7 +89,7 @@ struct DuetApp: App {
         .handlesExternalEvents(matching: [PaneActivity.condition("conversation")])
         #endif
         WindowGroup("Diagram", id: "diagram", for: String.self) { $id in
-            PaneWindow(place: id.map { .diagram($0) }).environment(model)
+            PaneWindow(place: id.map { .diagram($0) }).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if id == nil, case .diagram(let d) = $0 { id = d } }
         }
         #if os(macOS)
@@ -99,7 +100,7 @@ struct DuetApp: App {
         #endif
         // Everything else: the fleet, a worker, Needs You, notes, a folder, a plan.
         WindowGroup("Doublet", id: "pane", for: Destination.self) { $place in
-            PaneWindow(place: place).environment(model)
+            PaneWindow(place: place).environment(model).tint(.stateNeedsYou)
                 .opensDroppedPane { if place == nil { place = $0 } }
         }
         #if os(macOS)
@@ -116,14 +117,14 @@ struct DuetApp: App {
         #if os(macOS)
         // Ambient: status and decisions from the menu bar, without switching apps.
         MenuBarExtra {
-            MenuBarPanel().environment(model)
+            MenuBarPanel().environment(model).tint(.stateNeedsYou)
         } label: {
             MenuBarIcon().environment(model)
         }
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView().environment(model).frame(width: 480)
+            SettingsView().environment(model).tint(.stateNeedsYou).frame(width: 480)
         }
         #endif
     }

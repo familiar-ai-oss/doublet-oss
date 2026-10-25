@@ -108,8 +108,29 @@ public enum Tokens {
     public static let codeAddition = Token(dark: Hex(0x7ee787), light: Hex(0x116329))
     public static let codeDeletion = Token(dark: Hex(0xff7b72), light: Hex(0xa40e26))
 
+    // Syntax, outside the state colours: file and diff pages sit on `slateRaised`.
+    public static let codeKeyword = Token(dark: Hex(0xff7ab2), light: Hex(0x9b2393))
+    public static let codeString = Token(dark: Hex(0xfc6a5d), light: Hex(0xc41a16))
+    public static let codeRegexp = Token(dark: Hex(0xff8170), light: Hex(0xa3351b))
+    public static let codeSubst = Token(dark: Hex(0xe5e5e7), light: Hex(0x1d1d1f))
+    public static let codeNumber = Token(dark: Hex(0xd9c97c), light: Hex(0x1c00cf))
+    public static let codeType = Token(dark: Hex(0x5dd8ff), light: Hex(0x0b4f79))
+    public static let codeTitle = Token(dark: Hex(0x67b7a4), light: Hex(0x0f68a0))
+    public static let codeBuiltin = Token(dark: Hex(0xd0a8ff), light: Hex(0x6c36a9))
+    public static let codeMeta = Token(dark: Hex(0xfd8f3f), light: Hex(0x815f03))
+    /// Italic.
+    public static let codeComment = Token(dark: Hex(0x8e959e), light: Hex(0x6e7781))
+    /// Doc comments (///, /**) and docstrings, italic.
+    public static let codeDoc = Token(dark: Hex(0x7cc893), light: Hex(0x2e7a46))
+    public static let codeDoctag = Token(dark: Hex(0xa6e3b8), light: Hex(0x1a5c32))
+
+    // Brand graphics only (the mark, the icon, the lockup); never inside the app.
+    public static let brandIce = Token(Hex(0xe8edf5))
+    public static let brandInk = Token(Hex(0x0a0d14))
     /// Familiar's blue, for brand graphics.
     public static let brandBlue = Token(Hex(0x4da6ff))
+    /// Familiar's second accent, for its web and marketing. Not used inside Doublet.
+    public static let brandViolet = Token(Hex(0xa78bfa))
 }
 
 extension ShapeStyle where Self == Color {
@@ -139,6 +160,18 @@ extension ShapeStyle where Self == Color {
     public static var diffRemovedMark: Color { Tokens.diffRemovedMark.color }
     public static var codeAddition: Color { Tokens.codeAddition.color }
     public static var codeDeletion: Color { Tokens.codeDeletion.color }
+    public static var codeKeyword: Color { Tokens.codeKeyword.color }
+    public static var codeString: Color { Tokens.codeString.color }
+    public static var codeRegexp: Color { Tokens.codeRegexp.color }
+    public static var codeSubst: Color { Tokens.codeSubst.color }
+    public static var codeNumber: Color { Tokens.codeNumber.color }
+    public static var codeType: Color { Tokens.codeType.color }
+    public static var codeTitle: Color { Tokens.codeTitle.color }
+    public static var codeBuiltin: Color { Tokens.codeBuiltin.color }
+    public static var codeMeta: Color { Tokens.codeMeta.color }
+    public static var codeComment: Color { Tokens.codeComment.color }
+    public static var codeDoc: Color { Tokens.codeDoc.color }
+    public static var codeDoctag: Color { Tokens.codeDoctag.color }
 }
 
 /// Radii and spacing.
@@ -146,6 +179,11 @@ public enum DS {
     public static let radiusWell: CGFloat = 8
     public static let radiusCard: CGFloat = 14
     public static let radiusPanel: CGFloat = 20
+
+    // Elevation: the one shadow a floating panel casts. Cards cast none; while the Pencil is down, nothing does.
+    public static let shadowRadius: CGFloat = 16
+    public static let shadowY: CGFloat = 6
+    public static let shadowOpacity: Double = 0.16
 
     public static let space2: CGFloat = 2
     public static let space4: CGFloat = 4
@@ -168,6 +206,8 @@ extension Font {
     public static var dsOverline: Font { .custom(DS.brandFamily, size: 11, relativeTo: .caption2).weight(.semibold) }
     /// The wordmark: Exo 2 Black. Never for running text.
     public static var dsWordmark: Font { .custom(DS.brandFamily, size: 44, relativeTo: .largeTitle).weight(.black) }
+    /// "BY FAMILIAR" under the wordmark: Exo 2 ExtraLight 11, wide tracking (see `byline()`).
+    public static var dsByline: Font { .custom(DS.brandFamily, size: 11, relativeTo: .caption2).weight(.ultraLight) }
 }
 
 extension View {
@@ -179,6 +219,11 @@ extension View {
     /// Stop and other destructive main buttons: filled `stateFailed`, labelled `onFailed`.
     public func failedProminent() -> some View {
         buttonStyle(.borderedProminent).tint(.stateFailed).foregroundStyle(.onFailed)
+    }
+
+    /// The lockup's byline: caps, 0.28em tracking, secondary text. Never heavier than 200.
+    public func byline() -> some View {
+        font(.dsByline).textCase(.uppercase).tracking(3.08).foregroundStyle(.textSecondary)
     }
 
     /// An overline section label: Exo 2 SemiBold 11, uppercase, 0.08em tracking, secondary text.

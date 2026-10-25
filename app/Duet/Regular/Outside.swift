@@ -110,7 +110,7 @@ struct OutsideMessageRow: View {
             if !message.text.isEmpty {
                 Text(message.text).textSelection(.enabled)
                     .padding(.horizontal, 12).padding(.vertical, 8)
-                    .background { RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.accentColor.opacity(0.14)) }
+                    .background { RoundedRectangle(cornerRadius: 14, style: .continuous).fill(Color.slateHigh) }
                     .frame(maxWidth: .infinity, alignment: .trailing)
                     .padding(.leading, 48)
             }

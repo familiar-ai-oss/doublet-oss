@@ -38,3 +38,26 @@ func textReadsOnEverySurface(_ t: (String, Token, Double)) {
     // Decorative: visible, but never strong enough to be the only sign of a state.
     #expect(Hex.contrast(line, Tokens.slateRaised.dark) < 3)
 }
+
+/// Syntax colours read on the page they sit on, `slateRaised`, as tokens.json promises (4.5:1, the comment 4.6).
+@Test func codeColorsReadOnFilePages() {
+    let code: [(String, Token)] = [
+        ("keyword", Tokens.codeKeyword), ("string", Tokens.codeString), ("regexp", Tokens.codeRegexp),
+        ("subst", Tokens.codeSubst), ("number", Tokens.codeNumber), ("type", Tokens.codeType),
+        ("title", Tokens.codeTitle), ("builtin", Tokens.codeBuiltin), ("meta", Tokens.codeMeta),
+        ("comment", Tokens.codeComment), ("doc", Tokens.codeDoc), ("doctag", Tokens.codeDoctag),
+    ]
+    for (name, t) in code {
+        #expect(Hex.contrast(t.dark, Tokens.slateRaised.dark) >= 4.5, "code-\(name), dark")
+        #expect(Hex.contrast(t.light, Tokens.slateRaised.light) >= 4.5, "code-\(name), light")
+    }
+}
+
+@Test func everyStateHasItsOwnTokenSymbolAndWord() {
+    let states = DesignState.allCases
+    #expect(Set(states.map(\.symbol)).count == states.count)
+    #expect(Set(states.map(\.word)).count == states.count)
+    #expect(DesignState.working.token.dark == Tokens.stateWorking.dark)
+    #expect(DesignState.idle.token.light == Tokens.textSecondary.light)
+    #expect(states.filter(\.filled) == [.needsYou])
+}

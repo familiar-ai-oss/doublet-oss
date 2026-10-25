@@ -129,7 +129,7 @@ struct ApprovalCard: View {
             .focused($fieldFocused)
             .padding(8)
             .background { RoundedRectangle(cornerRadius: 8).fill(.background.secondary) }
-            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(Color.accentColor.opacity(0.6)) }
+            .overlay { RoundedRectangle(cornerRadius: 8).strokeBorder(Color.stateNeedsYou.opacity(0.6)) }
             .accessibilityIdentifier("edit-field-\(approvalId)")
             Text(draftError ?? (plan != nil ? "Claude works from the plan as you've edited it." : "Claude runs exactly this instead, and is told you edited it."))
                 .font(.caption).foregroundStyle(draftError == nil ? Color.secondary : Color.stateFailed)
@@ -341,7 +341,7 @@ struct AskedQuestionsCard: View {
                         Button { toggle(q, option.label) } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Image(systemName: on ? (q.multiple ? "checkmark.square.fill" : "largecircle.fill.circle") : (q.multiple ? "square" : "circle"))
-                                    .foregroundStyle(on ? Color.accentColor : .secondary)
+                                    .foregroundStyle(on ? Color.stateNeedsYou : .secondary)
                                 VStack(alignment: .leading, spacing: 2) {
                                     Text(option.label)
                                     if let detail = option.detail { Text(detail).font(.caption).foregroundStyle(.secondary) }

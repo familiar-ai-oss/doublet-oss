@@ -366,15 +366,15 @@ private struct ZoneLook: View {
                 .font(.title)
             Text(side == .leading ? "Open on the Left" : "Open on the Right").font(.callout.weight(.medium))
         }
-        .foregroundStyle(targeted ? Color.white : Color.accentColor)
+        .foregroundStyle(targeted ? Color.onNeedsYou : Color.stateNeedsYou)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(targeted ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.regularMaterial))
+                .fill(targeted ? AnyShapeStyle(Color.stateNeedsYou) : AnyShapeStyle(.regularMaterial))
         }
         .overlay {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .strokeBorder(Color.accentColor.opacity(0.6), style: StrokeStyle(lineWidth: 2, dash: targeted ? [] : [6, 5]))
+                .strokeBorder(Color.stateNeedsYou.opacity(0.6), style: StrokeStyle(lineWidth: 2, dash: targeted ? [] : [6, 5]))
         }
     }
 }
@@ -462,11 +462,11 @@ private struct TileLook: View {
             Image(systemName: symbol).font(.title2)
             Text(title).font(.caption.weight(.medium)).lineLimit(1)
         }
-        .foregroundStyle(targeted ? Color.white : dim ? Color.secondary : Color.primary)
+        .foregroundStyle(targeted ? Color.onNeedsYou : dim ? Color.secondary : Color.primary)
         .frame(width: 112, height: 76)
         .background {
             RoundedRectangle(cornerRadius: 14, style: .continuous)
-                .fill(targeted ? AnyShapeStyle(Color.accentColor) : AnyShapeStyle(.background.secondary))
+                .fill(targeted ? AnyShapeStyle(Color.stateNeedsYou) : AnyShapeStyle(.background.secondary))
         }
         .scaleEffect(targeted ? 1.06 : 1)
         .animation(.snappy(duration: 0.15), value: targeted)
@@ -504,7 +504,7 @@ struct LiftedTabGhost: View {
                     .lineLimit(1)
                     .padding(.horizontal, 12).padding(.vertical, 8)
                     .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                    .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.accentColor.opacity(0.7), lineWidth: 1.5) }
+                    .overlay { RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(Color.stateNeedsYou.opacity(0.7), lineWidth: 1.5) }
                     .shadow(color: .black.opacity(0.22), radius: 14, y: 6)
                     .scaleEffect(1.05)
                     .fixedSize()

@@ -193,7 +193,7 @@ private struct SwitcherPanel: View {
         .foregroundStyle(highlighted ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
         .padding(.horizontal, 10).padding(.vertical, 6)
         .background {
-            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(highlighted ? Color.accentColor : .clear)
+            RoundedRectangle(cornerRadius: 8, style: .continuous).fill(highlighted ? Color.stateNeedsYou : .clear)
         }
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(highlighted ? [.isButton, .isSelected] : [.isButton])

@@ -207,7 +207,7 @@ struct FileRow: View {
 
     var body: some View {
         HStack(spacing: 10) {
-            Image(systemName: FileIcon.symbol(entry)).foregroundStyle(entry.isFolder ? Color.accentColor : .secondary)
+            Image(systemName: FileIcon.symbol(entry)).foregroundStyle(entry.isFolder ? Color.textSecondary : .secondary)
                 .frame(width: 24)
             VStack(alignment: .leading, spacing: 1) {
                 Text(entry.name).lineLimit(1).truncationMode(.middle)
@@ -215,7 +215,7 @@ struct FileRow: View {
             }
             Spacer(minLength: 4)
             if notes > 0 {
-                Label("\(notes)", systemImage: "text.bubble.fill").font(.caption2.bold()).foregroundStyle(Color.accentColor)
+                Label("\(notes)", systemImage: "text.bubble.fill").font(.caption2.bold()).foregroundStyle(Color.stateNeedsYou)
                     .labelStyle(.titleAndIcon)
                     .accessibilityLabel("\(notes) note\(notes == 1 ? "" : "s")")
             }
