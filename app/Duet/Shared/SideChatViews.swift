@@ -338,12 +338,13 @@ struct SideMessageRow: View {
                 // Parsed once per message: the panel redraws as the next answer streams in.
                 Markdown(MarkdownCache.content("side-\(message.id)", message.text))
                     .markdownSoftBreakMode(.lineBreak)
+                    .diagramFences()
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 // A local answer stays short; its further points wait under "More".
                 if let more = message.more, !more.isEmpty {
                     DisclosureGroup("More") {
-                        Markdown(more).markdownSoftBreakMode(.lineBreak).textSelection(.enabled).padding(.top, 4)
+                        Markdown(more).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled).padding(.top, 4)
                     }
                     .font(.callout)
                 }

@@ -7,7 +7,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { lastReply, notePrompt, SIDE_ALLOWED, SIDE_TOOLS, SIDE_VOICE, SideChats, sidePrompt, type ForkSource, type SideDeps } from '../src/sidechat.ts';
+import { lastReply, notePrompt, SIDE_ALLOWED, SIDE_DIAGRAM, SIDE_TOOLS, SIDE_VOICE, SideChats, sidePrompt, type ForkSource, type SideDeps } from '../src/sidechat.ts';
 import { ANSWER_FIRST } from '../src/notes.ts';
 import type { EventBody } from '../src/protocol.ts';
 import { FolderWatch } from '../src/watch.ts';
@@ -82,6 +82,12 @@ test('the first question says what a side chat is, what it is about, and how muc
   assert.match(p, /\n\nAbout the file \/p\/fleet\.ts, lines 12-20\.\n\nWhy two GPUs\?$/);
   assert.match(sidePrompt('ipad', 'And this?', { kind: 'text', label: "qwen-27b's result", text: 'Finished: 3 files' }, 'before_turn'), /up to your last reply.*\n\nAbout qwen-27b's result:\nFinished: 3 files\n\nAnd this\?$/s);
   assert.match(sidePrompt('mac', 'Hi', undefined, 'none'), /There's no conversation to go on yet/);
+});
+
+test('a side chat, with no diagram tool, is told a ```mermaid block is drawn (it once said it could not draw and gave source)', () => {
+  assert.match(SIDE_DIAGRAM, /```mermaid block: Doublet draws it as a diagram/);
+  assert.ok(sidePrompt('mac', 'Make a diagram of the attempts', undefined, 'whole').includes(SIDE_DIAGRAM));
+  assert.ok(!notePrompt('Draw it', 'whole').includes(SIDE_DIAGRAM), "a note's thread draws with the tool");
 });
 
 test('answers start with the answer itself, in one short paragraph, so a device can show it alone (a sticky note)', () => {

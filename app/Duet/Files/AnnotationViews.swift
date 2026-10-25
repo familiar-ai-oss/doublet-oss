@@ -258,11 +258,11 @@ struct AnnotationDetail: View {
                     Spacer(minLength: 8)
                     if a.answered { AnswerChip(annotation: a) }
                 }
-                Markdown(Self.withoutNarration(text)).markdownSoftBreakMode(.lineBreak).textSelection(.enabled)
+                Markdown(Self.withoutNarration(text)).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled)
                 // A local answer stays short; its further points wait under "More".
                 if let more = a.more, !more.isEmpty {
                     DisclosureGroup("More") {
-                        Markdown(more).markdownSoftBreakMode(.lineBreak).textSelection(.enabled).padding(.top, 4)
+                        Markdown(more).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled).padding(.top, 4)
                     }
                     .font(.callout)
                 }
@@ -311,7 +311,7 @@ struct AnnotationDetail: View {
         // Claude was asked about a local model's answer: that answer is still here.
         if let local = a.localAnswer, !local.isEmpty {
             DisclosureGroup("The local model's answer") {
-                Markdown(local).markdownSoftBreakMode(.lineBreak).textSelection(.enabled).padding(.top, 6)
+                Markdown(local).markdownSoftBreakMode(.lineBreak).diagramFences().textSelection(.enabled).padding(.top, 6)
             }
             .font(.callout)
         }

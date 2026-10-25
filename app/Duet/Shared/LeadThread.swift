@@ -305,6 +305,7 @@ struct LeadRowView: View {
                 .padding(.leading, density == .compact ? 32 : 80)
             case .chunk(let id, let msg, let index, let count, let lines, let text):
                 Markdown(MarkdownCache.content(id, text))
+                    .diagramFences()
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if index == 0, count > density.collapseOver, !expanded {
